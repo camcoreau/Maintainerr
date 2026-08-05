@@ -1,10 +1,4 @@
-import {
-  cleanup,
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-} from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import RuleCreator, { type IRule } from './index'
 
@@ -78,7 +72,7 @@ vi.mock('./RuleInput', () => ({
       <button
         type="button"
         onClick={() =>
-          onCommit(0, {
+          onCommit({
             operator: null,
             firstVal: ['1', String(tagId)],
             action: 1,
@@ -111,7 +105,6 @@ const createRule = (
 
 describe('RuleCreator', () => {
   afterEach(() => {
-    cleanup()
     vi.clearAllMocks()
   })
 

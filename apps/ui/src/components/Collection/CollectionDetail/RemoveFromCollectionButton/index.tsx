@@ -1,6 +1,7 @@
 import { DocumentRemoveIcon, TrashIcon } from '@heroicons/react/solid'
 import { useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
+import { invalidateCollectionQueries } from '../../../../api/collections'
 import { DeleteApiHandler, PostApiHandler } from '../../../../utils/ApiHandler'
 import Button from '../../../Common/Button'
 import Modal from '../../../Common/Modal'
@@ -15,7 +16,7 @@ interface IRemoveFromCollectionButton {
 const RemoveFromCollectionButton = (props: IRemoveFromCollectionButton) => {
   const queryClient = useQueryClient()
   const [sure, setSure] = useState<boolean>(false)
-  const [popup, setppopup] = useState<boolean>(false)
+  const [popup, setPopup] = useState<boolean>(false)
   const [removing, setRemoving] = useState<boolean>(false)
   const isCreatingExclusion = !props.exclusionId
   const actionLabel = isCreatingExclusion ? 'Exclude' : 'Remove'
@@ -25,7 +26,7 @@ const RemoveFromCollectionButton = (props: IRemoveFromCollectionButton) => {
   const handlePopup = (e?: React.MouseEvent<HTMLElement>) => {
     e?.stopPropagation()
     if (props.popup) {
-      setppopup(!popup)
+      setPopup(!popup)
     }
   }
 
@@ -47,9 +48,7 @@ const RemoveFromCollectionButton = (props: IRemoveFromCollectionButton) => {
           }),
         ])
 
-        await queryClient.invalidateQueries({
-          queryKey: ['calendar', 'collections', 'overlay-data'],
-        })
+        await invalidateCollectionQueries(queryClient)
       } else {
         await DeleteApiHandler(`/rules/exclusion/${props.exclusionId}`)
       }

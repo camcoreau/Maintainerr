@@ -54,12 +54,13 @@ interface IRuleInput {
   dataType?: MediaItemType
   section?: number
   editData?: { rule: IRule }
-  onCommit: (id: number, rule: IRule) => void
+  onCommit: (rule: IRule) => void
   onIncomplete: (id: number) => void
   onDelete: (section: number, id: number) => void
   allowDelete?: boolean
   radarrSettingsId?: number | null
   sonarrSettingsId?: number | null
+  sportarrSettingsId?: number | null
 }
 
 /**
@@ -70,6 +71,7 @@ const shouldFilterApplication = (
   appId: number,
   radarrSettingsId: number | null | undefined,
   sonarrSettingsId: number | null | undefined,
+  sportarrSettingsId: number | null | undefined,
   isPlex: boolean,
   isJellyfin: boolean,
   isEmby: boolean = false,
@@ -88,6 +90,13 @@ const shouldFilterApplication = (
   ) {
     return true
   }
+  // Filter out Sportarr if no Sportarr server is selected
+  if (
+    appId === Application.SPORTARR &&
+    (sportarrSettingsId === undefined || sportarrSettingsId === null)
+  ) {
+    return true
+  }
   // Filter out Plex/Tautulli on non-Plex servers (Jellyfin, Emby).
   if (
     (isJellyfin || isEmby) &&
@@ -95,8 +104,11 @@ const shouldFilterApplication = (
   ) {
     return true
   }
-  // Filter out Jellyfin on Plex/Emby.
-  if ((isPlex || isEmby) && appId === Application.JELLYFIN) {
+  // Filter out Jellyfin and its Streamystats companion on Plex/Emby.
+  if (
+    (isPlex || isEmby) &&
+    (appId === Application.JELLYFIN || appId === Application.STREAMYSTATS)
+  ) {
     return true
   }
   // Filter out Emby on Plex/Jellyfin.
@@ -267,7 +279,7 @@ const RuleInput = (props: IRuleInput) => {
   const [operator, setOperator] = useState<string | undefined>(
     initialRuleState.operator,
   )
-  const [firstval, setFirstVal] = useState<string | undefined>(
+  const [firstVal, setFirstVal] = useState<string | undefined>(
     initialRuleState.firstVal,
   )
   const [action, setAction] = useState<RulePossibility | undefined>(
@@ -296,6 +308,7 @@ const RuleInput = (props: IRuleInput) => {
               app.id,
               props.radarrSettingsId,
               props.sonarrSettingsId,
+              props.sportarrSettingsId,
               isPlex,
               isJellyfin,
               isEmby,
@@ -324,23 +337,24 @@ const RuleInput = (props: IRuleInput) => {
     props.mediaType,
     props.radarrSettingsId,
     props.sonarrSettingsId,
+    props.sportarrSettingsId,
   ])
 
   const validFirstVal = useMemo(() => {
-    if (!firstval) {
+    if (!firstVal) {
       return undefined
     }
 
     // Keep the raw saved selection in state so edit flows can recover it if later inputs make it valid again.
-    const [applicationId, propertyId] = JSON.parse(firstval) as [number, number]
+    const [applicationId, propertyId] = JSON.parse(firstVal) as [number, number]
     const application = availableApplications.find(
       (currentApplication) => currentApplication.id === +applicationId,
     )
 
     return application?.props.find((prop) => prop.id === +propertyId)
-      ? firstval
+      ? firstVal
       : undefined
-  }, [availableApplications, firstval])
+  }, [availableApplications, firstVal])
 
   const firstValueTuple = useMemo<[number, number] | undefined>(() => {
     if (!validFirstVal) return undefined
@@ -529,10 +543,20 @@ const RuleInput = (props: IRuleInput) => {
       secondVal !== CustomParams.CUSTOM_TEXT_LIST &&
       secondVal !== CustomParams.CUSTOM_BOOLEAN
 
+    // Every rule except the very first one renders an operator dropdown
+    // (mirrors the render gate below): the section operator for the first
+    // rule of a section, otherwise the within-section operator. Require an
+    // explicit choice so the combine semantics are never inferred from an
+    // unset (null) value - see the comparator's section-action handling.
+    const operatorRequired =
+      props.id !== 1 &&
+      (!!(props.id && props.id > 0) || !!(props.section && props.section > 1))
+
     if (
       validFirstVal &&
       action != null &&
-      (!requiresSecondValue || hasSecondValue || !!customVal)
+      (!requiresSecondValue || hasSecondValue || !!customVal) &&
+      (!operatorRequired || !!operator)
     ) {
       const ruleValues = {
         operator: operator ? operator : null,
@@ -542,9 +566,9 @@ const RuleInput = (props: IRuleInput) => {
         ...(isSelectedArrDiskspaceRule && arrDiskPath ? { arrDiskPath } : {}),
       }
       if (!requiresSecondValue) {
-        props.onCommit(props.id ? props.id : 0, ruleValues)
+        props.onCommit(ruleValues)
       } else if (customVal) {
-        props.onCommit(props.id ? props.id : 0, {
+        props.onCommit({
           customVal: {
             ruleTypeId: customValActive
               ? customValType === RuleType.DATE
@@ -567,7 +591,7 @@ const RuleInput = (props: IRuleInput) => {
           ...ruleValues,
         })
       } else {
-        props.onCommit(props.id ? props.id : 0, {
+        props.onCommit({
           lastVal: JSON.parse(secondVal!),
           ...ruleValues,
         })

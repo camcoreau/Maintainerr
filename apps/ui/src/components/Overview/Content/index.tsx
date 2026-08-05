@@ -19,11 +19,15 @@ interface IOverviewContent {
   extrasLoading?: boolean
   fetchData: () => void
   onRemove?: (id: string) => void
+  onItemPostponed?: (id: string, addDate: string) => void
   libraryId: string
   collectionPage?: boolean
   collectionInfo?: ICollectionMedia[]
   collectionId?: number
   collection?: ICollection
+  selectionMode?: boolean
+  selectedMediaIds?: ReadonlySet<string>
+  onToggleSelection?: (mediaId: string, selected: boolean) => void
 }
 
 function extractProviderIds(
@@ -125,83 +129,93 @@ const OverviewContent = (props: IOverviewContent) => {
           <LoadingSpinner />
         </div>
       ) : hasData ? (
-        <ul
-          className="cards-vertical"
-          aria-busy={loading || Boolean(extrasLoading)}
-        >
-          {data.map((el) => (
-            <li key={el.id}>
-              <MediaCard
-                id={el.id}
-                libraryId={props.libraryId}
-                type={el.type}
-                summary={
-                  el.type === 'movie' || el.type === 'show'
-                    ? el.summary
-                    : el.type === 'season'
-                      ? el.title
-                      : el.type === 'episode'
-                        ? 'Episode ' + el.index + ' - ' + el.title
-                        : ''
-                }
-                year={
-                  el.type === 'episode'
-                    ? el.parentTitle
-                    : getParentYear(el)
-                      ? getParentYear(el)?.toString()
-                      : el.year?.toString()
-                }
-                mediaType={el.type}
-                title={
-                  el.grandparentTitle
-                    ? el.grandparentTitle
-                    : el.parentTitle
+        // @container lets the grid size its columns to this wrapper's width
+        // (not the viewport), so it lays out correctly inside narrow contexts
+        // like the collection-detail exclusions slideover.
+        <div className="@container">
+          <ul
+            className="cards-vertical"
+            aria-busy={loading || Boolean(extrasLoading)}
+          >
+            {data.map((el) => (
+              <li key={el.id}>
+                <MediaCard
+                  id={el.id}
+                  libraryId={props.libraryId}
+                  type={el.type}
+                  summary={el.summary}
+                  year={
+                    el.type === 'episode'
                       ? el.parentTitle
-                      : el.title
-                }
-                exclusionId={
-                  el.maintainerrExclusionId
-                    ? el.maintainerrExclusionId
-                    : undefined
-                }
-                providerIds={extractProviderIds(el)}
-                collectionPage={
-                  props.collectionPage ? props.collectionPage : false
-                }
-                exclusionType={el.maintainerrExclusionType}
-                onRemove={props.onRemove}
-                collectionId={props.collectionId}
-                collection={
-                  props.collection ??
-                  props.collectionInfo?.find(
-                    (colEl) => colEl.mediaServerId === el.id,
-                  )?.collection
-                }
-                isManual={
-                  el.maintainerrIsManual ? el.maintainerrIsManual : false
-                }
-                {...(props.collectionInfo
-                  ? {
-                      daysLeft: getDaysLeft(el.id),
-                      collectionId: props.collectionInfo.find(
-                        (colEl) => colEl.mediaServerId === el.id,
-                      )?.collectionId,
-                    }
-                  : undefined)}
-              />
-            </li>
-          ))}
-          {showAppendLoading ? (
-            <li
-              className="flex min-h-10 items-center justify-center"
-              style={{ overflowAnchor: 'none' }}
-            >
-              <div role="status" aria-label="Loading more items">
-                <SmallLoadingSpinner className="h-10 w-10" />
-              </div>
-            </li>
-          ) : null}
-        </ul>
+                      : getParentYear(el)
+                        ? getParentYear(el)?.toString()
+                        : el.year?.toString()
+                  }
+                  mediaType={el.type}
+                  seasonNumber={
+                    el.type === 'season'
+                      ? el.index
+                      : el.type === 'episode'
+                        ? el.parentIndex
+                        : undefined
+                  }
+                  episodeNumber={el.type === 'episode' ? el.index : undefined}
+                  episodeTitle={el.type === 'episode' ? el.title : undefined}
+                  title={
+                    el.grandparentTitle
+                      ? el.grandparentTitle
+                      : el.parentTitle
+                        ? el.parentTitle
+                        : el.title
+                  }
+                  exclusionId={
+                    el.maintainerrExclusionId
+                      ? el.maintainerrExclusionId
+                      : undefined
+                  }
+                  providerIds={extractProviderIds(el)}
+                  collectionPage={
+                    props.collectionPage ? props.collectionPage : false
+                  }
+                  exclusionType={el.maintainerrExclusionType}
+                  onRemove={props.onRemove}
+                  onItemPostponed={props.onItemPostponed}
+                  collectionId={props.collectionId}
+                  collection={
+                    props.collection ??
+                    props.collectionInfo?.find(
+                      (colEl) => colEl.mediaServerId === el.id,
+                    )?.collection
+                  }
+                  isManual={
+                    el.maintainerrIsManual ? el.maintainerrIsManual : false
+                  }
+                  selectionMode={props.selectionMode}
+                  selected={props.selectedMediaIds?.has(el.id) ?? false}
+                  onToggleSelection={props.onToggleSelection}
+                  {...(props.collectionInfo
+                    ? {
+                        daysLeft: getDaysLeft(el.id),
+                        collectionId: props.collectionInfo.find(
+                          (colEl) => colEl.mediaServerId === el.id,
+                        )?.collectionId,
+                      }
+                    : undefined)}
+                />
+              </li>
+            ))}
+            {showAppendLoading ? (
+              <li
+                className="flex min-h-10 items-center justify-center"
+                style={{ overflowAnchor: 'none' }}
+              >
+                <div role="status" aria-label="Loading more items">
+                  <SmallLoadingSpinner className="h-10 w-10" />
+                </div>
+              </li>
+            ) : null}
+          </ul>
+        </div>
       ) : (
         <div className="flex min-h-80 items-center justify-center rounded-xl border border-dashed border-zinc-700 bg-zinc-900/30 p-6 text-sm text-zinc-400">
           No items found.

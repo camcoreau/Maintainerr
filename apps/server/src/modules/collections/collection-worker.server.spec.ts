@@ -60,7 +60,10 @@ describe('CollectionWorkerService', () => {
 
     executionLock.acquire.mockResolvedValue(jest.fn());
     eventEmitter.emit.mockImplementation();
-    mediaServerFactory.verifyConnection.mockResolvedValue({} as any);
+    mediaServerFactory.verifyConnection.mockResolvedValue({
+      supportsFeature: jest.fn().mockReturnValue(false),
+      getActiveSessions: jest.fn().mockResolvedValue(new Set<string>()),
+    } as any);
   });
 
   it('should abort if another instance is running', async () => {
@@ -119,7 +122,7 @@ describe('CollectionWorkerService', () => {
 
     collectionRepository.find.mockResolvedValue([collection]);
     collectionMediaRepository.find.mockResolvedValue([collectionMedia]);
-    collectionHandler.handleMedia.mockResolvedValue(true);
+    collectionHandler.handleMedia.mockResolvedValue('handled');
 
     await collectionWorkerService.execute();
 
@@ -131,6 +134,48 @@ describe('CollectionWorkerService', () => {
     });
     expect(collectionHandler.handleMedia).toHaveBeenCalled();
     expect(seerrApi.api.post).toHaveBeenCalled();
+  });
+
+  it('captures the media title before handling and carries it on the handled event (#3249)', async () => {
+    const collection = createCollection({
+      arrAction: ServarrAction.DELETE,
+      type: 'movie',
+    });
+    const collectionMedia = createCollectionMedia(collection, {
+      mediaServerId: 'gone-after-delete',
+    });
+
+    // getMetadata resolves before handling, then reports the item gone once the
+    // delete action has run - the pre-handling snapshot is what the handled
+    // notification relies on.
+    const snapshot = { title: 'A Sample Movie', type: 'movie' };
+    const getMetadata = jest
+      .fn()
+      .mockResolvedValueOnce(snapshot)
+      .mockResolvedValue(undefined);
+    mediaServerFactory.verifyConnection.mockResolvedValue({
+      supportsFeature: jest.fn().mockReturnValue(false),
+      getActiveSessions: jest.fn().mockResolvedValue(new Set<string>()),
+      getMetadata,
+    } as any);
+
+    collectionRepository.find.mockResolvedValue([collection]);
+    collectionMediaRepository.find.mockResolvedValue([collectionMedia]);
+    collectionHandler.handleMedia.mockResolvedValue('handled');
+
+    await collectionWorkerService.execute();
+
+    expect(getMetadata).toHaveBeenCalledWith('gone-after-delete');
+    expect(eventEmitter.emit).toHaveBeenCalledWith(
+      MaintainerrEvent.CollectionMedia_Handled,
+      expect.objectContaining({
+        collectionName: collection.title,
+        mediaItems: [
+          { mediaServerId: 'gone-after-delete', metadata: snapshot },
+        ],
+        identifier: { type: 'collection', value: collection.id },
+      }),
+    );
   });
 
   it('skips flagged rule-owned media but still handles flagged manual media', async () => {
@@ -156,7 +201,7 @@ describe('CollectionWorkerService', () => {
       flaggedRuleOwnedMedia,
       flaggedManualMedia,
     ]);
-    collectionHandler.handleMedia.mockResolvedValue(true);
+    collectionHandler.handleMedia.mockResolvedValue('handled');
 
     await collectionWorkerService.execute();
 
@@ -171,6 +216,43 @@ describe('CollectionWorkerService', () => {
     );
   });
 
+  it('defers currently-playing media to the next run when the server reports active sessions', async () => {
+    const collection = createCollection({
+      arrAction: ServarrAction.DELETE,
+      type: 'movie',
+    });
+    const playingMedia = createCollectionMedia(collection, {
+      mediaServerId: 'playing',
+    });
+    const idleMedia = createCollectionMedia(collection, {
+      mediaServerId: 'idle',
+    });
+
+    mediaServerFactory.verifyConnection.mockResolvedValue({
+      supportsFeature: jest.fn().mockReturnValue(true),
+      getActiveSessions: jest.fn().mockResolvedValue(new Set(['playing'])),
+    } as any);
+
+    collectionRepository.find.mockResolvedValue([collection]);
+    collectionMediaRepository.find.mockResolvedValue([playingMedia, idleMedia]);
+    collectionHandler.handleMedia.mockResolvedValue('handled');
+
+    await collectionWorkerService.execute();
+
+    expect(collectionHandler.handleMedia).toHaveBeenCalledTimes(1);
+    expect(collectionHandler.handleMedia).toHaveBeenCalledWith(
+      collection,
+      idleMedia,
+    );
+    expect(collectionHandler.handleMedia).not.toHaveBeenCalledWith(
+      collection,
+      playingMedia,
+    );
+    expect(logger.log).toHaveBeenCalledWith(
+      `Deferring 1 currently-playing media item(s) in collection '${collection.title}' to the next run`,
+    );
+  });
+
   it('should not report failed media as handled', async () => {
     settings.seerrConfigured.mockReturnValue(true);
 
@@ -182,13 +264,46 @@ describe('CollectionWorkerService', () => {
 
     collectionRepository.find.mockResolvedValue([collection]);
     collectionMediaRepository.find.mockResolvedValue([collectionMedia]);
-    collectionHandler.handleMedia.mockResolvedValue(false);
+    collectionHandler.handleMedia.mockResolvedValue('failed');
 
     await collectionWorkerService.execute();
 
     expect(seerrApi.api.post).not.toHaveBeenCalled();
     expect(eventEmitter.emit).toHaveBeenCalledWith(
       MaintainerrEvent.CollectionHandler_Failed,
+      expect.objectContaining({
+        collectionName: collection.title,
+        mediaItems: [{ mediaServerId: collectionMedia.mediaServerId }],
+        identifier: { type: 'collection', value: collection.id },
+      }),
+    );
+    expect(eventEmitter.emit).not.toHaveBeenCalledWith(
+      MaintainerrEvent.CollectionMedia_Handled,
+      expect.anything(),
+    );
+  });
+
+  it('does not notify or trigger availability sync when media was pruned as missing', async () => {
+    settings.seerrConfigured.mockReturnValue(true);
+
+    const collection = createCollection({
+      arrAction: ServarrAction.DELETE,
+      type: 'show',
+    });
+    const collectionMedia = createCollectionMedia(collection);
+
+    collectionRepository.find.mockResolvedValue([collection]);
+    collectionMediaRepository.find.mockResolvedValue([collectionMedia]);
+    collectionHandler.handleMedia.mockResolvedValue('removed-missing');
+
+    await collectionWorkerService.execute();
+
+    // The item was already gone - nothing on disk changed, so no sync and
+    // neither the handled nor the failed notification fires.
+    expect(seerrApi.api.post).not.toHaveBeenCalled();
+    expect(eventEmitter.emit).not.toHaveBeenCalledWith(
+      MaintainerrEvent.CollectionHandler_Failed,
+      expect.anything(),
     );
     expect(eventEmitter.emit).not.toHaveBeenCalledWith(
       MaintainerrEvent.CollectionMedia_Handled,
@@ -217,7 +332,7 @@ describe('CollectionWorkerService', () => {
     ]);
     collectionHandler.handleMedia
       .mockRejectedValueOnce(new Error('boom'))
-      .mockResolvedValueOnce(true);
+      .mockResolvedValueOnce('handled');
 
     await collectionWorkerService.execute();
 
@@ -225,6 +340,11 @@ describe('CollectionWorkerService', () => {
     expect(seerrApi.api.post).toHaveBeenCalled();
     expect(eventEmitter.emit).toHaveBeenCalledWith(
       MaintainerrEvent.CollectionHandler_Failed,
+      expect.objectContaining({
+        collectionName: collection.title,
+        mediaItems: [{ mediaServerId: firstCollectionMedia.mediaServerId }],
+        identifier: { type: 'collection', value: collection.id },
+      }),
     );
   });
 

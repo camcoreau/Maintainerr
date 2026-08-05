@@ -1,5 +1,13 @@
-import { MediaItemType, RuleExecuteStatusDto } from '@maintainerr/contracts';
 import {
+  BULK_EXCLUSION_MAX_ITEMS,
+  bulkExclusionRequestSchema,
+  type BulkExclusionRequest,
+  type BulkExclusionResponse,
+  MediaItemType,
+  RuleExecuteStatusDto,
+} from '@maintainerr/contracts';
+import {
+  BadRequestException,
   Body,
   ConflictException,
   Controller,
@@ -17,6 +25,7 @@ import {
 } from '@nestjs/common';
 import { ApiResponse } from '@nestjs/swagger';
 import { Response } from 'express';
+import { ZodValidationPipe } from 'nestjs-zod';
 import { MaintainerrLogger } from '../logging/logs.service';
 import { CommunityRule } from './dtos/communityRule.dto';
 import { ExclusionAction, ExclusionContextDto } from './dtos/exclusion.dto';
@@ -232,9 +241,36 @@ export class RulesController {
     res.status(HttpStatus.ACCEPTED).send();
   }
 
+  // A rule group that failed validation used to answer 201 with the reason
+  // buried in the body, so a caller could not tell it apart from a save.
+  private orFail(status: ReturnStatus): ReturnStatus {
+    if (status.code !== 1) {
+      throw new BadRequestException(status.message ?? status.result);
+    }
+    return status;
+  }
+
   @Post()
+  @ApiResponse({ status: 201, description: 'The rule group was created.' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'The rule group was rejected. The message names what was wrong.',
+  })
+  @ApiResponse({
+    status: 500,
+    description: 'The rule group could not be written. The cause is logged.',
+  })
+  @ApiResponse({
+    status: 502,
+    description: 'The media server could not be read to resolve the library.',
+  })
+  @ApiResponse({
+    status: 503,
+    description: 'The configured media server adapter could not initialize.',
+  })
   async setRules(@Body() body: RulesDto): Promise<ReturnStatus> {
-    return await this.rulesService.setRules(body);
+    return this.orFail(await this.rulesService.setRules(body));
   }
 
   @Post('/exclusion')
@@ -244,6 +280,22 @@ export class RulesController {
     } else {
       return await this.rulesService.removeExclusionWitData(body);
     }
+  }
+
+  @Post('/exclusions/bulk')
+  @ApiResponse({
+    status: 201,
+    description: 'Per-item results; failures are reported per media id.',
+  })
+  @ApiResponse({
+    status: 400,
+    description: `Rejected without processing: empty, or more than ${BULK_EXCLUSION_MAX_ITEMS} media ids.`,
+  })
+  async setBulkExclusions(
+    @Body(new ZodValidationPipe(bulkExclusionRequestSchema))
+    body: BulkExclusionRequest,
+  ): Promise<BulkExclusionResponse> {
+    return await this.rulesService.setBulkExclusions(body.mediaIds);
   }
 
   @Delete('/exclusion/:id')
@@ -261,8 +313,27 @@ export class RulesController {
   }
 
   @Put()
+  @ApiResponse({ status: 200, description: 'The rule group was updated.' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'The rule group was rejected. The message names what was wrong.',
+  })
+  @ApiResponse({ status: 404, description: 'The rule group does not exist.' })
+  @ApiResponse({
+    status: 500,
+    description: 'The rule group could not be written. The cause is logged.',
+  })
+  @ApiResponse({
+    status: 502,
+    description: 'The media server could not be read to resolve the library.',
+  })
+  @ApiResponse({
+    status: 503,
+    description: 'The configured media server adapter could not initialize.',
+  })
   async updateRule(@Body() body: RulesDto): Promise<ReturnStatus> {
-    return await this.rulesService.updateRules(body);
+    return this.orFail(await this.rulesService.updateRules(body));
   }
 
   @Post('/community')
@@ -330,11 +401,19 @@ export class RulesController {
     @Body() body: { yaml: string; mediaType: MediaItemType },
   ): Promise<ReturnStatus> {
     try {
-      return this.rulesService.decodeFromYaml(body.yaml, body.mediaType);
+      return await this.rulesService.decodeFromYaml(body.yaml, body.mediaType);
     } catch (error) {
+      // A genuine YAML syntax/structure error is already handled inside the
+      // service (it returns a clear message). Reaching here means a later
+      // failure (e.g. rule migration) threw, which is not a YAML problem - log
+      // the real fault and surface a plain, accurate message instead.
+      this.logger.error('Failed to import rules from YAML');
+      this.logger.debug(error);
+      const message = 'Failed to import rules';
       return {
         code: 0,
-        result: 'Invalid input',
+        result: message,
+        message,
       };
     }
   }

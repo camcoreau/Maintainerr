@@ -10,6 +10,8 @@ import {
 import { zodResolver } from '@hookform/resolvers/zod'
 import {
   Application,
+  isValidMediaItemType,
+  leftoverCleanupScope,
   MediaItemType,
   MediaLibrary,
   MediaServerFeature,
@@ -27,6 +29,7 @@ import { z } from 'zod'
 import { IRuleGroup } from '..'
 import { useMediaServerLibraries } from '../../../../api/media-server'
 import { getOverlayTemplates } from '../../../../api/overlays'
+import { useServarrSettings } from '../../../../api/settings'
 import {
   RuleGroupCreatePayload,
   useCreateRuleGroup,
@@ -34,6 +37,7 @@ import {
   useUpdateRuleGroup,
 } from '../../../../api/rules'
 import { useMediaServerType } from '../../../../hooks/useMediaServerType'
+import { getApiErrorMessage } from '../../../../utils/ApiError'
 import { PostApiHandler } from '../../../../utils/ApiHandler'
 import { logClientError } from '../../../../utils/ClientLogger'
 import Alert from '../../../Common/Alert'
@@ -93,6 +97,7 @@ const shouldFilterApp = (
   appId: number,
   radarrId: number | null | undefined,
   sonarrId: number | null | undefined,
+  sportarrId: number | null | undefined,
 ): boolean => {
   if (
     appId === Application.RADARR &&
@@ -106,6 +111,12 @@ const shouldFilterApp = (
   ) {
     return true
   }
+  if (
+    appId === Application.SPORTARR &&
+    (sportarrId === undefined || sportarrId === null)
+  ) {
+    return true
+  }
   return false
 }
 
@@ -114,13 +125,15 @@ const filterRulesForArrSettings = (
   rules: IRule[],
   radarrId: number | null | undefined,
   sonarrId: number | null | undefined,
+  sportarrId: number | null | undefined,
 ): IRule[] => {
   return rules.filter((rule) => {
-    if (shouldFilterApp(+rule.firstVal[0], radarrId, sonarrId)) return false
+    if (shouldFilterApp(+rule.firstVal[0], radarrId, sonarrId, sportarrId))
+      return false
     if (
       rule.lastVal &&
       Array.isArray(rule.lastVal) &&
-      shouldFilterApp(+rule.lastVal[0], radarrId, sonarrId)
+      shouldFilterApp(+rule.lastVal[0], radarrId, sonarrId, sportarrId)
     ) {
       return false
     }
@@ -252,6 +265,55 @@ const SONARR_EPISODE_ACTION_OPTIONS = sortActionOptions([
   },
 ])
 
+const SPORTARR_SHOW_ACTION_OPTIONS = sortActionOptions([
+  {
+    id: ServarrAction.DELETE,
+    name: 'Delete entire league',
+  },
+  {
+    id: ServarrAction.UNMONITOR,
+    name: 'Unmonitor league, keep files',
+  },
+  {
+    id: ServarrAction.DO_NOTHING,
+    name: 'Do nothing',
+  },
+  {
+    id: ServarrAction.CHANGE_QUALITY_PROFILE,
+    name: 'Change quality profile',
+  },
+])
+
+const SPORTARR_SEASON_ACTION_OPTIONS = sortActionOptions([
+  {
+    id: ServarrAction.DELETE,
+    name: 'Unmonitor season, delete event files',
+  },
+  {
+    id: ServarrAction.UNMONITOR,
+    name: 'Unmonitor season, keep files',
+  },
+  {
+    id: ServarrAction.DO_NOTHING,
+    name: 'Do nothing',
+  },
+])
+
+const SPORTARR_EPISODE_ACTION_OPTIONS = sortActionOptions([
+  {
+    id: ServarrAction.DELETE,
+    name: 'Delete event file',
+  },
+  {
+    id: ServarrAction.UNMONITOR,
+    name: 'Unmonitor event, keep file',
+  },
+  {
+    id: ServarrAction.DO_NOTHING,
+    name: 'Do nothing',
+  },
+])
+
 export const ruleGroupFormSchema = z
   .object({
     name: z.string().trim().min(1, 'Name is required'),
@@ -297,6 +359,7 @@ export const ruleGroupFormSchema = z
     overlayEnabled: z.boolean(),
     overlayTemplateId: z.number().int().nullable().optional(),
     listExclusions: z.boolean(),
+    cleanupLeftoverFolders: z.boolean(),
     forceSeerr: z.boolean(),
     manualCollection: z.boolean(),
     manualCollectionName: z.string().optional(),
@@ -306,8 +369,11 @@ export const ruleGroupFormSchema = z
     useRules: z.boolean(),
     radarrSettingsId: z.number().int().nullable().optional(),
     sonarrSettingsId: z.number().int().nullable().optional(),
+    sportarrSettingsId: z.number().int().nullable().optional(),
     radarrQualityProfileId: z.number().int().nullable().optional(),
     sonarrQualityProfileId: z.number().int().nullable().optional(),
+    sportarrQualityProfileId: z.number().int().nullable().optional(),
+    tagInArr: z.boolean().optional(),
     ruleHandlerCronSchedule: z.preprocess(
       (val) => (val === '' ? null : val),
       z
@@ -351,7 +417,17 @@ export const ruleGroupFormSchema = z
         })
       }
 
-      if (isShow && data.sonarrQualityProfileId == null) {
+      // A show library is managed by exactly one of Sonarr/Sportarr; require
+      // the profile of whichever manager the collection is bound to.
+      if (isShow && data.sportarrSettingsId != null) {
+        if (data.sportarrQualityProfileId == null) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['sportarrQualityProfileId'],
+            message: 'Quality profile is required for this action',
+          })
+        }
+      } else if (isShow && data.sonarrQualityProfileId == null) {
         ctx.addIssue({
           code: 'custom',
           path: ['sonarrQualityProfileId'],
@@ -380,6 +456,7 @@ const buildFormDefaults = (editData?: IRuleGroup): RuleGroupFormValues => ({
   overlayEnabled: editData?.collection?.overlayEnabled ?? false,
   overlayTemplateId: editData?.collection?.overlayTemplateId ?? null,
   listExclusions: editData?.collection?.listExclusions ?? true,
+  cleanupLeftoverFolders: editData?.collection?.cleanupLeftoverFolders ?? false,
   forceSeerr: editData?.collection?.forceSeerr ?? false,
   manualCollection: editData?.collection?.manualCollection ?? false,
   manualCollectionName: editData?.collection?.manualCollectionName ?? '',
@@ -393,14 +470,40 @@ const buildFormDefaults = (editData?: IRuleGroup): RuleGroupFormValues => ({
   sonarrSettingsId: editData
     ? (editData.collection?.sonarrSettingsId ?? null)
     : undefined,
+  sportarrSettingsId: editData
+    ? (editData.collection?.sportarrSettingsId ?? null)
+    : undefined,
   radarrQualityProfileId: editData
     ? (editData.collection?.radarrQualityProfileId ?? undefined)
     : undefined,
   sonarrQualityProfileId: editData
     ? (editData.collection?.sonarrQualityProfileId ?? undefined)
     : undefined,
+  sportarrQualityProfileId: editData
+    ? (editData.collection?.sportarrQualityProfileId ?? undefined)
+    : undefined,
+  tagInArr: editData?.collection?.tagInArr ?? false,
   ruleHandlerCronSchedule: editData?.ruleHandlerCronSchedule ?? null,
 })
+
+/**
+ * Tell the user that some rules were dropped because a property isn't available
+ * (no equivalent on the configured media server, or an unresolved identifier).
+ * Shared by the community import, YAML import and YAML export paths, so the copy
+ * stays neutral about direction.
+ */
+const notifySkippedRules = (skipped: number) => {
+  if (skipped <= 0) return
+  const plural = skipped !== 1
+  toast.warn(
+    `${skipped} rule${plural ? 's' : ''} ${plural ? 'were' : 'was'} skipped - ${
+      plural
+        ? "they use properties that aren't available"
+        : "it uses a property that isn't available"
+    }.`,
+    { autoClose: 6000 },
+  )
+}
 
 const AddModal = (props: AddModal) => {
   const navigate = useNavigate()
@@ -432,14 +535,22 @@ const AddModal = (props: AddModal) => {
 
   const {
     mutateAsync: createRuleGroup,
-    isError: isCreateError,
+    error: createError,
     isPending: isCreatePending,
   } = useCreateRuleGroup()
   const {
     mutateAsync: updateRuleGroup,
-    isError: isUpdateError,
+    error: updateError,
     isPending: isUpdatePending,
   } = useUpdateRuleGroup()
+
+  // The server names what it rejected ("Operator is required for every rule
+  // after the first"); saying "something went wrong" instead left the user to
+  // guess which of the form's values it meant.
+  const saveError = createError ?? updateError
+  const saveErrorMessage = saveError
+    ? getApiErrorMessage(saveError, 'The rule group could not be saved')
+    : undefined
 
   const selectedLibraryId = useWatch({ control, name: 'libraryId' }) ?? ''
   const selectedType = useWatch({ control, name: 'dataType' }) ?? ''
@@ -461,16 +572,15 @@ const AddModal = (props: AddModal) => {
   }) as number | null | undefined
   const useRulesEnabled = useWatch({ control, name: 'useRules' })
   const arrActionValue = useWatch({ control, name: 'arrAction' }) as
-    | number
-    | undefined
+    number | undefined
   const radarrSettingsId = useWatch({ control, name: 'radarrSettingsId' }) as
-    | number
-    | null
-    | undefined
+    number | null | undefined
   const sonarrSettingsId = useWatch({ control, name: 'sonarrSettingsId' }) as
-    | number
-    | null
-    | undefined
+    number | null | undefined
+  const sportarrSettingsId = useWatch({
+    control,
+    name: 'sportarrSettingsId',
+  }) as number | null | undefined
   const radarrQualityProfileId = useWatch({
     control,
     name: 'radarrQualityProfileId',
@@ -479,11 +589,26 @@ const AddModal = (props: AddModal) => {
     control,
     name: 'sonarrQualityProfileId',
   }) as number | null | undefined
+  const sportarrQualityProfileId = useWatch({
+    control,
+    name: 'sportarrQualityProfileId',
+  }) as number | null | undefined
   const hasSelectedRadarrServer = radarrSettingsId != null
   const hasSelectedSonarrServer = sonarrSettingsId != null
+  // Which folder the chosen action strands, or undefined when it strands none.
+  // leftoverCleanupScope is shared with the server, so the checkbox is offered
+  // for exactly the actions the handlers act on.
+  const cleanupScope =
+    arrActionValue !== undefined && isValidMediaItemType(selectedType)
+      ? leftoverCleanupScope(selectedType, arrActionValue)
+      : undefined
+  // Which *arr owns this collection: movie libraries are Radarr's, every other
+  // type (show, season, episode) is Sonarr's.
+  const cleanupArrName = selectedType === 'movie' ? 'Radarr' : 'Sonarr'
+  const hasSelectedSportarrServer = sportarrSettingsId != null
   const [showCommunityModal, setShowCommunityModal] = useState(false)
   const [yamlImporterModal, setYamlImporterModal] = useState(false)
-  const [configureNotificionModal, setConfigureNotificationModal] =
+  const [configureNotificationModal, setConfigureNotificationModal] =
     useState(false)
 
   const [yaml, setYaml] = useState<string | undefined>(undefined)
@@ -500,6 +625,16 @@ const AddModal = (props: AddModal) => {
   )
   const [formIncomplete, setFormIncomplete] = useState<boolean>(false)
   const [ruleCreatorVersion, setRuleCreatorVersion] = useState<number>(1)
+  // Which *arr manages a show-library collection. A Plex "show" library can be
+  // a TV library (Sonarr) or a sports library (Sportarr), so the user picks one
+  // per collection. Only surfaced when a Sportarr server exists.
+  const [showLibraryManager, setShowLibraryManager] = useState<
+    'Sonarr' | 'Sportarr'
+  >(
+    props.editData?.collection?.sportarrSettingsId != null
+      ? 'Sportarr'
+      : 'Sonarr',
+  )
   const [overlayTemplates, setOverlayTemplates] = useState<OverlayTemplate[]>(
     [],
   )
@@ -572,6 +707,11 @@ const AddModal = (props: AddModal) => {
   const seerrEnabled =
     constants?.applications?.some((x) => x.id == Application.SEERR) ?? false
 
+  // Only surface the Sportarr manager option once a Sportarr server exists, so
+  // the existing Sonarr/Radarr collection flow is unchanged for everyone else.
+  const { data: sportarrSettingsList } = useServarrSettings('sportarr')
+  const hasSportarrConfigured = (sportarrSettingsList?.length ?? 0) > 0
+
   function updateLibraryId(value: string) {
     // Selecting the unresolved stored-library fallback keeps the original
     // library type intact instead of resetting dependent state based on an
@@ -596,12 +736,46 @@ const AddModal = (props: AddModal) => {
 
     setValue('radarrSettingsId', undefined)
     setValue('sonarrSettingsId', undefined)
+    setValue('sportarrSettingsId', undefined)
     setValue('radarrQualityProfileId', undefined)
     setValue('sonarrQualityProfileId', undefined)
+    setValue('sportarrQualityProfileId', undefined)
+    setValue('tagInArr', false)
+    setValue('cleanupLeftoverFolders', false)
+    setShowLibraryManager('Sonarr')
     updateArrOption(ServarrAction.DELETE)
 
     // Clear rules that reference *arr servers since we're resetting them
-    const filtered = filterRulesForArrSettings(rules, undefined, undefined)
+    const filtered = filterRulesForArrSettings(
+      rules,
+      undefined,
+      undefined,
+      undefined,
+    )
+    if (filtered.length !== rules.length) {
+      setRules(filtered)
+      setRuleCreatorVersion((v) => v + 1)
+    }
+  }
+
+  // Switch which *arr manages a show-library collection. Clears the other
+  // manager's selection so only one is ever set, and resets the action.
+  const handleShowManagerChange = (manager: 'Sonarr' | 'Sportarr') => {
+    setShowLibraryManager(manager)
+    setValue('sonarrSettingsId', undefined)
+    setValue('sportarrSettingsId', undefined)
+    setValue('sonarrQualityProfileId', undefined)
+    setValue('sportarrQualityProfileId', undefined)
+    setValue('tagInArr', false)
+    setValue('cleanupLeftoverFolders', false)
+    updateArrOption(ServarrAction.DELETE)
+
+    const filtered = filterRulesForArrSettings(
+      rules,
+      radarrSettingsId,
+      undefined,
+      undefined,
+    )
     if (filtered.length !== rules.length) {
       setRules(filtered)
       setRuleCreatorVersion((v) => v + 1)
@@ -625,11 +799,24 @@ const AddModal = (props: AddModal) => {
     if (value !== ServarrAction.CHANGE_QUALITY_PROFILE) {
       setValue('radarrQualityProfileId', undefined)
       setValue('sonarrQualityProfileId', undefined)
+      setValue('sportarrQualityProfileId', undefined)
+    }
+
+    // Drop the leftover-folder cleanup opt-in when the new action strands no
+    // folder; the checkbox hides with it, so don't leave a destructive option
+    // enabled out of sight. The server clamps the same way on save.
+    const dataType = getValues('dataType')
+    if (
+      value === undefined ||
+      !isValidMediaItemType(dataType) ||
+      leftoverCleanupScope(dataType, value) === undefined
+    ) {
+      setValue('cleanupLeftoverFolders', false)
     }
   }
 
   const handleUpdateArrAction = (
-    type: 'Radarr' | 'Sonarr',
+    type: 'Radarr' | 'Sonarr' | 'Sportarr',
     arrAction: number,
     settingId?: number | null,
   ) => {
@@ -643,14 +830,35 @@ const AddModal = (props: AddModal) => {
       setValue('sonarrQualityProfileId', undefined)
     }
 
+    if (type === 'Sportarr' && settingId !== sportarrSettingsId) {
+      setValue('sportarrQualityProfileId', undefined)
+    }
+
+    // Drop the membership-tag and leftover-cleanup opt-ins if the matching *arr
+    // server is deselected; both checkboxes hide with the server, so don't
+    // leave a stale enabled flag.
+    if (settingId == null) {
+      setValue('tagInArr', false)
+      setValue('cleanupLeftoverFolders', false)
+    }
+
+    // A collection is managed by exactly one *arr, so selecting a server for one
+    // clears the other two.
     const newRadarrId = type === 'Radarr' ? settingId : undefined
     const newSonarrId = type === 'Sonarr' ? settingId : undefined
+    const newSportarrId = type === 'Sportarr' ? settingId : undefined
 
     setValue('radarrSettingsId', newRadarrId)
     setValue('sonarrSettingsId', newSonarrId)
+    setValue('sportarrSettingsId', newSportarrId)
 
     // Filter out rules that reference the deselected *arr server
-    const filtered = filterRulesForArrSettings(rules, newRadarrId, newSonarrId)
+    const filtered = filterRulesForArrSettings(
+      rules,
+      newRadarrId,
+      newSonarrId,
+      newSportarrId,
+    )
     if (filtered.length !== rules.length) {
       setRules(filtered)
       setRuleCreatorVersion((v) => v + 1)
@@ -677,6 +885,7 @@ const AddModal = (props: AddModal) => {
 
     if (response.code === 1) {
       setYaml(response.result)
+      notifySkippedRules(response.skipped ?? 0)
 
       if (!yamlImporterModal) {
         setYamlImporterModal(true)
@@ -713,6 +922,7 @@ const AddModal = (props: AddModal) => {
       toast.success('Successfully imported rules from Yaml.', {
         autoClose: 5000,
       })
+      notifySkippedRules(response.skipped ?? 0)
     } else {
       toast.error(response.message, { autoClose: 5000 })
     }
@@ -727,6 +937,7 @@ const AddModal = (props: AddModal) => {
     if (response && response.code === 1) {
       const migratedRules = JSON.parse(response.result) as IRule[]
       updateRules(migratedRules)
+      notifySkippedRules(rules.length - migratedRules.length)
     } else {
       // If migration fails, use original rules
       updateRules(rules)
@@ -754,7 +965,7 @@ const AddModal = (props: AddModal) => {
     setFormIncomplete(false)
 
     // Disabling an active rule group freezes its tracked items rather than
-    // clearing them — confirm so users don't expect the linked collection to
+    // clearing them - confirm so users don't expect the linked collection to
     // drain on its own.
     const isDisablingActiveGroup =
       props.editData &&
@@ -780,12 +991,16 @@ const AddModal = (props: AddModal) => {
       isActive: data.active,
       useRules: data.useRules,
       listExclusions: data.listExclusions,
+      cleanupLeftoverFolders: data.cleanupLeftoverFolders,
       forceSeerr: data.forceSeerr,
       tautulliWatchedPercentOverride: data.tautulliWatchedPercentOverride,
       radarrSettingsId: data.radarrSettingsId ?? undefined,
       sonarrSettingsId: data.sonarrSettingsId ?? undefined,
+      sportarrSettingsId: data.sportarrSettingsId ?? undefined,
       radarrQualityProfileId: data.radarrQualityProfileId ?? undefined,
       sonarrQualityProfileId: data.sonarrQualityProfileId ?? undefined,
+      sportarrQualityProfileId: data.sportarrQualityProfileId ?? undefined,
+      tagInArr: data.tagInArr ?? false,
       collection: {
         visibleOnRecommended: data.showRecommended,
         visibleOnHome: data.showHome,
@@ -827,7 +1042,9 @@ const AddModal = (props: AddModal) => {
         mutationError,
         'RuleGroup.AddModal.handleSave',
       )
-      toast.error('Failed to save rule group. Check logs for details.')
+      toast.error(
+        getApiErrorMessage(mutationError, 'The rule group could not be saved'),
+      )
     }
   }
 
@@ -839,7 +1056,7 @@ const AddModal = (props: AddModal) => {
 
   // Only hard-block on rule constants: the form can't render its applications,
   // rule operators, or field options without them. Libraries are allowed to
-  // stream in later — when editing, the stored library is surfaced via
+  // stream in later - when editing, the stored library is surfaced via
   // `storedLibraryMissing` so the form remains usable even if the media
   // server is offline. For brand-new rule groups we still wait for libraries
   // because there's no fallback selection to preserve.
@@ -881,12 +1098,7 @@ const AddModal = (props: AddModal) => {
           </Alert>
         )}
 
-        {(isCreateError || isUpdateError) && (
-          <Alert>
-            Something went wrong saving the group.. Please verify that all
-            values are valid
-          </Alert>
-        )}
+        {saveErrorMessage && <Alert>{saveErrorMessage}</Alert>}
 
         {formIncomplete && (
           <Alert>
@@ -902,7 +1114,7 @@ const AddModal = (props: AddModal) => {
                 General
               </h2>
               <div className="flex w-full flex-col rounded-lg bg-zinc-800 px-3 py-1">
-                <div className="space-y-2 md:p-4">
+                <div className="md:p-4">
                   <div className="form-row items-center">
                     <label htmlFor="name" className="text-label">
                       Name *
@@ -931,6 +1143,7 @@ const AddModal = (props: AddModal) => {
                       <div className="form-input-field">
                         <textarea
                           id="description"
+                          className="field-sizing-content min-h-30"
                           rows={5}
                           {...register('description')}
                         ></textarea>
@@ -944,40 +1157,34 @@ const AddModal = (props: AddModal) => {
                     </label>
                     <div className="form-input">
                       <div className="form-input-field">
-                        {(() => {
-                          const field = register('libraryId')
-                          return (
-                            <Select
-                              id="library"
-                              {...field}
-                              onChange={(event) => {
-                                field.onChange(event)
-                                updateLibraryId(event.target.value)
-                              }}
-                            >
-                              {selectedLibraryId === '' && (
-                                <option value="" disabled></option>
-                              )}
-                              {showStoredLibraryFallback && storedLibraryId && (
-                                <option value={storedLibraryId}>
-                                  Stored library (unavailable)
-                                </option>
-                              )}
-                              {libraries?.map((data: MediaLibrary) => {
-                                return (
-                                  <option key={data.id} value={data.id}>
-                                    {data.title}
-                                  </option>
-                                )
-                              })}
-                            </Select>
-                          )
-                        })()}
+                        <Select
+                          id="library"
+                          {...register('libraryId', {
+                            onChange: (event) =>
+                              updateLibraryId(event.target.value),
+                          })}
+                        >
+                          {selectedLibraryId === '' && (
+                            <option value="" disabled></option>
+                          )}
+                          {showStoredLibraryFallback && storedLibraryId && (
+                            <option value={storedLibraryId}>
+                              Stored library (unavailable)
+                            </option>
+                          )}
+                          {libraries?.map((data: MediaLibrary) => {
+                            return (
+                              <option key={data.id} value={data.id}>
+                                {data.title}
+                              </option>
+                            )
+                          })}
+                        </Select>
                       </div>
                       {(librariesError || storedLibraryMissing) && (
                         <p className="mt-1 text-xs text-warning-500">
                           {librariesError
-                            ? `Could not load libraries from ${mediaServerName}. The saved library selection is preserved — cancel editing to avoid losing rules.`
+                            ? `Could not load libraries from ${mediaServerName}. The saved library selection is preserved - cancel editing to avoid losing rules.`
                             : 'The saved library could not be found in the current library list. Re-select it once your media server is reachable.'}
                         </p>
                       )}
@@ -1032,30 +1239,24 @@ const AddModal = (props: AddModal) => {
                         </label>
                         <div className="form-input">
                           <div className="form-input-field">
-                            {(() => {
-                              const field = register('dataType')
-                              return (
-                                <Select
-                                  id="type"
-                                  {...field}
-                                  onChange={(event) => {
-                                    field.onChange(event)
-                                    updateArrOption(ServarrAction.DELETE)
-                                  }}
-                                >
-                                  {/* Show TV-related types: show, season, episode */}
-                                  {(['show', 'season', 'episode'] as const).map(
-                                    (mediaType) => (
-                                      <option key={mediaType} value={mediaType}>
-                                        {mediaType[0].toUpperCase() +
-                                          mediaType.slice(1) +
-                                          's'}
-                                      </option>
-                                    ),
-                                  )}
-                                </Select>
-                              )
-                            })()}
+                            <Select
+                              id="type"
+                              {...register('dataType', {
+                                onChange: () =>
+                                  updateArrOption(ServarrAction.DELETE),
+                              })}
+                            >
+                              {/* Show TV-related types: show, season, episode */}
+                              {(['show', 'season', 'episode'] as const).map(
+                                (mediaType) => (
+                                  <option key={mediaType} value={mediaType}>
+                                    {mediaType[0].toUpperCase() +
+                                      mediaType.slice(1) +
+                                      's'}
+                                  </option>
+                                ),
+                              )}
+                            </Select>
                           </div>
                           {errors.dataType && (
                             <p className="mt-1 text-xs text-error-400">
@@ -1065,44 +1266,134 @@ const AddModal = (props: AddModal) => {
                         </div>
                       </div>
 
-                      <ArrAction
-                        type="Sonarr"
-                        mediaServerName={mediaServerName}
-                        arrAction={arrActionValue}
-                        settingId={sonarrSettingsId}
-                        onUpdate={(e: number, settingId?: number | null) => {
-                          handleUpdateArrAction('Sonarr', e, settingId)
-                        }}
-                        options={
-                          selectedType === 'show'
-                            ? SONARR_SHOW_ACTION_OPTIONS
-                            : selectedType === 'season'
-                              ? SONARR_SEASON_ACTION_OPTIONS
-                              : // episodes
-                                SONARR_EPISODE_ACTION_OPTIONS
-                        }
-                      />
-                      {errors.sonarrSettingsId && (
-                        <p className="mt-1 text-xs text-error-400">
-                          {errors.sonarrSettingsId.message}
-                        </p>
+                      {/* A "show" library can be TV (Sonarr) or sports
+                          (Sportarr); let the user pick which manages this
+                          collection. Only shown when Sportarr is configured,
+                          so the Sonarr-only flow is unchanged otherwise. */}
+                      {hasSportarrConfigured && (
+                        <div className="form-row items-center">
+                          <label
+                            htmlFor="show-library-manager"
+                            className="text-label"
+                          >
+                            Managed by
+                          </label>
+                          <div className="form-input">
+                            <div className="form-input-field">
+                              <Select
+                                name="show-library-manager"
+                                id="show-library-manager"
+                                value={showLibraryManager}
+                                onChange={(e) =>
+                                  handleShowManagerChange(
+                                    e.target.value as 'Sonarr' | 'Sportarr',
+                                  )
+                                }
+                              >
+                                <option value="Sonarr">Sonarr</option>
+                                <option value="Sportarr">Sportarr</option>
+                              </Select>
+                            </div>
+                          </div>
+                        </div>
                       )}
 
-                      {hasSelectedSonarrServer &&
-                        arrActionValue ===
-                          ServarrAction.CHANGE_QUALITY_PROFILE && (
-                          <QualityProfileSelector
+                      {(!hasSportarrConfigured ||
+                        showLibraryManager === 'Sonarr') && (
+                        <>
+                          <ArrAction
                             type="Sonarr"
+                            mediaServerName={mediaServerName}
+                            arrAction={arrActionValue}
                             settingId={sonarrSettingsId}
-                            qualityProfileId={sonarrQualityProfileId}
-                            onUpdate={(qualityProfileId) => {
-                              setValue(
-                                'sonarrQualityProfileId',
-                                qualityProfileId,
-                              )
+                            onUpdate={(
+                              e: number,
+                              settingId?: number | null,
+                            ) => {
+                              handleUpdateArrAction('Sonarr', e, settingId)
                             }}
-                            error={errors.sonarrQualityProfileId?.message}
+                            options={
+                              selectedType === 'show'
+                                ? SONARR_SHOW_ACTION_OPTIONS
+                                : selectedType === 'season'
+                                  ? SONARR_SEASON_ACTION_OPTIONS
+                                  : // episodes
+                                    SONARR_EPISODE_ACTION_OPTIONS
+                            }
                           />
+                          {errors.sonarrSettingsId && (
+                            <p className="mt-1 text-xs text-error-400">
+                              {errors.sonarrSettingsId.message}
+                            </p>
+                          )}
+
+                          {hasSelectedSonarrServer &&
+                            arrActionValue ===
+                              ServarrAction.CHANGE_QUALITY_PROFILE && (
+                              <QualityProfileSelector
+                                type="Sonarr"
+                                settingId={sonarrSettingsId}
+                                qualityProfileId={sonarrQualityProfileId}
+                                onUpdate={(qualityProfileId) => {
+                                  setValue(
+                                    'sonarrQualityProfileId',
+                                    qualityProfileId,
+                                  )
+                                }}
+                                error={errors.sonarrQualityProfileId?.message}
+                              />
+                            )}
+                        </>
+                      )}
+
+                      {hasSportarrConfigured &&
+                        showLibraryManager === 'Sportarr' && (
+                          <>
+                            <ArrAction
+                              type="Sportarr"
+                              mediaServerName={mediaServerName}
+                              arrAction={arrActionValue}
+                              settingId={sportarrSettingsId}
+                              onUpdate={(
+                                e: number,
+                                settingId?: number | null,
+                              ) => {
+                                handleUpdateArrAction('Sportarr', e, settingId)
+                              }}
+                              options={
+                                selectedType === 'show'
+                                  ? SPORTARR_SHOW_ACTION_OPTIONS
+                                  : selectedType === 'season'
+                                    ? SPORTARR_SEASON_ACTION_OPTIONS
+                                    : // episodes
+                                      SPORTARR_EPISODE_ACTION_OPTIONS
+                              }
+                            />
+                            {errors.sportarrSettingsId && (
+                              <p className="mt-1 text-xs text-error-400">
+                                {errors.sportarrSettingsId.message}
+                              </p>
+                            )}
+
+                            {hasSelectedSportarrServer &&
+                              arrActionValue ===
+                                ServarrAction.CHANGE_QUALITY_PROFILE && (
+                                <QualityProfileSelector
+                                  type="Sportarr"
+                                  settingId={sportarrSettingsId}
+                                  qualityProfileId={sportarrQualityProfileId}
+                                  onUpdate={(qualityProfileId) => {
+                                    setValue(
+                                      'sportarrQualityProfileId',
+                                      qualityProfileId,
+                                    )
+                                  }}
+                                  error={
+                                    errors.sportarrQualityProfileId?.message
+                                  }
+                                />
+                              )}
+                          </>
                         )}
                     </>
                   )}
@@ -1118,8 +1409,7 @@ const AddModal = (props: AddModal) => {
                           Take action after days*
                           <p className="text-xs font-normal">
                             Duration of days media remains in the{' '}
-                            {collectionTerm}
-                            before deletion/unmonitor
+                            {collectionTerm} before deletion/unmonitor
                           </p>
                         </label>
                         <div className="form-input">
@@ -1327,7 +1617,82 @@ const AddModal = (props: AddModal) => {
                       </div>
                     )}
 
-                    {seerrEnabled && (
+                    {/* Only the actions that delete an item's files one at a
+                        time strand a folder; leftoverCleanupScope is the one
+                        definition of which those are, shared with the server. */}
+                    {cleanupScope !== undefined &&
+                      ((selectedType === 'movie' && hasSelectedRadarrServer) ||
+                        (selectedType !== 'movie' &&
+                          hasSelectedSonarrServer)) && (
+                        <div className="flex flex-row items-center justify-between py-4">
+                          <label
+                            htmlFor="cleanup_leftover_folders"
+                            className="text-label"
+                          >
+                            Clean up leftover folders
+                            <span className="ml-1.5 rounded-full bg-maintainerr-600 px-3 text-sm font-medium text-white">
+                              BETA
+                            </span>
+                            <p className="text-xs font-normal">
+                              Delete the folder {cleanupArrName} leaves behind
+                              and its sidecars (subtitles, .nfo, artwork).
+                              Requires the library mounted at the same path{' '}
+                              {cleanupArrName} uses
+                            </p>
+                          </label>
+                          <div className="form-input">
+                            <div className="form-input-field">
+                              <input
+                                type="checkbox"
+                                id="cleanup_leftover_folders"
+                                className="checkbox"
+                                {...register('cleanupLeftoverFolders')}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                    {/* Strict 'show' (not selectedLibraryType) on purpose:
+                        Sonarr tags are series-level, so season/episode
+                        collections - which map to 'show' - are excluded. */}
+                    {((selectedLibraryType === 'movie' &&
+                      hasSelectedRadarrServer) ||
+                      (selectedType === 'show' && hasSelectedSonarrServer)) && (
+                      <div className="flex flex-row items-center justify-between py-4">
+                        <label htmlFor="tag_in_arr" className="text-label">
+                          Tag this content in{' '}
+                          {selectedLibraryType === 'movie'
+                            ? 'Radarr'
+                            : 'Sonarr'}
+                          <p className="text-xs font-normal">
+                            Tag matching{' '}
+                            {selectedLibraryType === 'movie'
+                              ? 'movies'
+                              : 'shows'}{' '}
+                            in{' '}
+                            {selectedLibraryType === 'movie'
+                              ? 'Radarr'
+                              : 'Sonarr'}{' '}
+                            with a tag based on this rule group&apos;s name
+                            while they&apos;re in the {collectionTerm}, removed
+                            when they leave
+                          </p>
+                        </label>
+                        <div className="form-input">
+                          <div className="form-input-field">
+                            <input
+                              type="checkbox"
+                              id="tag_in_arr"
+                              className="checkbox"
+                              {...register('tagInArr')}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {seerrEnabled && selectedType !== 'episode' && (
                       <div className="flex flex-row items-center justify-between py-4">
                         <label htmlFor="force_seerr" className="text-label">
                           Force delete Seerr request
@@ -1426,9 +1791,6 @@ const AddModal = (props: AddModal) => {
                         className="text-label flex flex-wrap gap-1"
                       >
                         Notifications
-                        <span className="ml-1.5 rounded-full bg-maintainerr-600 px-3 text-white">
-                          BETA
-                        </span>
                       </label>
                       <div className="flex justify-end px-2 py-2">
                         <div className="form-input-field w-32">
@@ -1439,7 +1801,7 @@ const AddModal = (props: AddModal) => {
                             className="w-full bg-maintainerr-600! hover:bg-maintainerr!"
                             onClick={() => {
                               setConfigureNotificationModal(
-                                !configureNotificionModal,
+                                !configureNotificationModal,
                               )
                             }}
                           >
@@ -1510,7 +1872,7 @@ const AddModal = (props: AddModal) => {
                           <p className="text-xs font-normal">
                             Automatically sort items inside the {collectionTerm}{' '}
                             on {mediaServerName}. Disabling later does not
-                            restore the default order — change it in{' '}
+                            restore the default order - change it in{' '}
                             {mediaServerName} if needed.
                           </p>
                         </label>
@@ -1639,46 +2001,37 @@ const AddModal = (props: AddModal) => {
                       </p>
                     </div>
                     <div className="ml-auto">
-                      <button
-                        className="ml-3 flex h-fit rounded-sm bg-maintainerrdark p-1 text-sm text-zinc-900 shadow-md hover:bg-maintainerrdark-800 md:h-10 md:text-base"
+                      <Button
+                        buttonType="success"
+                        className="ml-3"
                         onClick={toggleCommunityRuleModal}
                         type="button"
                       >
-                        {
-                          <CloudDownloadIcon className="m-auto ml-4 h-6 w-6 text-zinc-200" />
-                        }
-                        <p className="button-text m-auto mr-4 ml-1 text-zinc-100">
-                          Community
-                        </p>
-                      </button>
+                        <CloudDownloadIcon className="mr-2 h-5 w-5" />
+                        Community
+                      </Button>
                     </div>
                   </div>
                   <div className="mt-4 flex items-center justify-center sm:justify-end">
-                    <button
-                      className="ml-3 flex h-fit rounded-sm bg-maintainerr-600 p-1 text-sm text-zinc-900 shadow-md hover:bg-maintainerr md:h-10 md:text-base"
+                    <Button
+                      buttonType="success"
+                      className="ml-3"
                       onClick={toggleYamlImporter}
                       type="button"
                     >
-                      {
-                        <DownloadIcon className="m-auto ml-4 h-6 w-6 text-zinc-200 md:h-6" />
-                      }
-                      <p className="button-text m-auto mr-4 ml-1 text-zinc-100">
-                        Import
-                      </p>
-                    </button>
+                      <DownloadIcon className="mr-2 h-5 w-5" />
+                      Import
+                    </Button>
 
-                    <button
-                      className="ml-3 flex h-fit rounded-sm bg-maintainerrdark p-1 text-sm shadow-md hover:bg-maintainerrdark-800 md:h-10 md:text-base"
+                    <Button
+                      buttonType="success"
+                      className="ml-3"
                       onClick={toggleYamlExporter}
                       type="button"
                     >
-                      {
-                        <UploadIcon className="m-auto ml-4 h-6 w-6 text-zinc-200" />
-                      }
-                      <p className="button-text m-auto mr-4 ml-1 text-zinc-100">
-                        Export
-                      </p>
-                    </button>
+                      <UploadIcon className="mr-2 h-5 w-5" />
+                      Export
+                    </Button>
                   </div>
                 </div>
                 {showCommunityModal && selectedLibraryType && (
@@ -1710,7 +2063,7 @@ const AddModal = (props: AddModal) => {
                   </LazyModalBoundary>
                 )}
 
-                {configureNotificionModal && (
+                {configureNotificationModal && (
                   <LazyModalBoundary
                     title="Configure Notifications"
                     onCancel={() => {
@@ -1743,6 +2096,7 @@ const AddModal = (props: AddModal) => {
                   editData={{ rules: rules }}
                   radarrSettingsId={radarrSettingsId}
                   sonarrSettingsId={sonarrSettingsId}
+                  sportarrSettingsId={sportarrSettingsId}
                   onCancel={cancel}
                   onUpdate={updateRules}
                 />
@@ -1776,7 +2130,7 @@ const AddModal = (props: AddModal) => {
                 label="Save"
                 pendingLabel="Save"
                 contentSize="compact"
-                className="w-full max-w-[160px]"
+                className="w-full max-w-40"
                 isPending={isCreatePending || isUpdatePending}
                 disabled={isCreatePending || isUpdatePending}
                 type="submit"
@@ -1784,7 +2138,7 @@ const AddModal = (props: AddModal) => {
 
               <Button
                 buttonType="default"
-                className="w-full max-w-[160px] justify-center"
+                className="w-full max-w-40 justify-center"
                 type="button"
                 onClick={cancel}
                 disabled={isCreatePending || isUpdatePending}

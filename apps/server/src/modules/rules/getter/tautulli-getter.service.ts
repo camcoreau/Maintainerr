@@ -43,7 +43,15 @@ export class TautulliGetterService {
   ) {
     try {
       const prop = this.appProperties.find((el) => el.id === id);
+
       const metadata = await this.tautulliApi.getMetadata(libItem.id);
+      // Tautulli answers null both for an item it does not know and for a failed
+      // read, so this keeps the transient contract. Reading through the null
+      // threw instead, which surfaced as the same signal behind a misleading
+      // "Action failed" warning.
+      if (!metadata) {
+        return undefined;
+      }
       const collection = await this.collectionRepository.findOne({
         where: { id: ruleGroup.collection.id },
       });
@@ -52,7 +60,7 @@ export class TautulliGetterService {
 
       switch (prop.name) {
         // At season/show level `sw_watchers` returns the UNION of users that
-        // watched any descendant episode — not the intersection. Tautulli's
+        // watched any descendant episode - not the intersection. Tautulli's
         // history aggregates child views via grandparent_rating_key /
         // parent_rating_key, so any account that watched at least one
         // episode appears here. Use `sw_allEpisodesSeenBy` when you need
@@ -178,25 +186,24 @@ export class TautulliGetterService {
           return uniqueEpisodes.length;
         }
         case 'sw_lastWatched': {
-          let history = await this.getHistoryForMetadata(metadata);
-
-          history
-            .filter((x) =>
+          const history = (await this.getHistoryForMetadata(metadata)).filter(
+            (x) =>
               tautulliWatchedPercentOverride != null
                 ? x.percent_complete >= tautulliWatchedPercentOverride
                 : x.watched_status == 1,
-            )
-            .sort((a, b) => a.parent_media_index - b.parent_media_index)
-            .reverse();
+          );
 
-          history = history.filter(
+          if (history.length === 0) {
+            return null;
+          }
+
+          history.sort((a, b) => b.parent_media_index - a.parent_media_index);
+          const newestSeason = history.filter(
             (el) => el.parent_media_index === history[0].parent_media_index,
           );
-          history.sort((a, b) => a.media_index - b.media_index).reverse();
+          newestSeason.sort((a, b) => b.media_index - a.media_index);
 
-          return history.length > 0
-            ? new Date(history[0].stopped * 1000)
-            : null;
+          return new Date(newestSeason[0].stopped * 1000);
         }
         default: {
           return null;

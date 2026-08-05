@@ -1,5 +1,6 @@
 import {
   BasicResponseDto,
+  DownloadClientSetting,
   EmbySetting,
   JellyfinSetting,
   MediaServerSwitchPreview,
@@ -19,6 +20,7 @@ import {
 import axios from 'axios'
 import type { IRadarrSetting } from '../components/Settings/Radarr'
 import type { ISonarrSetting } from '../components/Settings/Sonarr'
+import type { ISportarrSetting } from '../components/Settings/Sportarr'
 import GetApiHandler, {
   API_BASE_PATH,
   DeleteApiHandler,
@@ -58,9 +60,26 @@ export interface ISettings {
   seerr_api_key: string
   tautulli_url: string
   tautulli_api_key: string
+  streamystats_url?: string
+  tracearr_url?: string
+  tracearr_api_key?: string
+  tracearr_server_id?: string
+  // Download client integration (currently qBittorrent)
+  download_client_url?: string
+  download_client_username?: string
+  download_client_password?: string
+  download_client_delete_data?: boolean
+  download_client_fallback_ratio?: number
   collection_handler_job_cron: string
   rules_handler_job_cron: string
   metadata_provider_preference?: MetadataProviderPreference
+  // *arr exclusion tagging (https://features.maintainerr.info/posts/81) - Radarr and Sonarr configured independently
+  radarr_tag_exclusions?: boolean
+  radarr_exclusion_tag?: string
+  radarr_untag_on_unexclude?: boolean
+  sonarr_tag_exclusions?: boolean
+  sonarr_exclusion_tag?: string
+  sonarr_untag_on_unexclude?: boolean
 }
 
 // Jellyfin test result (not in contracts as it's UI-specific)
@@ -139,10 +158,16 @@ export type UsePatchSettingsResult = ReturnType<typeof usePatchSettings>
 
 type UsePlexServersQueryKey = ['settings', 'plexServers']
 type UsePlexAuthValidationQueryKey = ['settings', 'plexAuthValidation']
-type UseServarrSettingsQueryKey = ['settings', 'servarr', 'radarr' | 'sonarr']
+type UseServarrSettingsQueryKey = [
+  'settings',
+  'servarr',
+  'radarr' | 'sonarr' | 'sportarr',
+]
 
 export interface PlexAuthValidationResult {
   valid: boolean
+  // plex.tv couldn't be reached to verify a stored token; it may still be valid.
+  unreachable?: boolean
   errorMessage?: string
 }
 
@@ -268,6 +293,7 @@ export const usePlexAuthValidation = (
       const result = await GetApiHandler<{
         status: string
         code: number
+        unreachable?: boolean
         message: string
       }>('/settings/test/plex/auth')
 
@@ -277,12 +303,19 @@ export const usePlexAuthValidation = (
 
       return {
         valid: false,
+        unreachable: result.unreachable === true,
         errorMessage:
           result.message ||
           'Stored Plex credentials are invalid. Re-authenticate with Plex.',
       }
     },
     staleTime: 0,
+    // If plex.tv was unreachable, retry a few times 3s apart so a transient
+    // blip self-heals; then stop to avoid an endless poll.
+    refetchInterval: (query) =>
+      query.state.data?.unreachable && query.state.dataUpdateCount < 3
+        ? 3000
+        : false,
     ...options,
   })
 }
@@ -347,9 +380,9 @@ type UseServarrSettingsOptions<TSetting> = Omit<
 >
 
 export const useServarrSettings = <
-  TSetting extends IRadarrSetting | ISonarrSetting,
+  TSetting extends IRadarrSetting | ISonarrSetting | ISportarrSetting,
 >(
-  type: 'radarr' | 'sonarr',
+  type: 'radarr' | 'sonarr' | 'sportarr',
   options?: UseServarrSettingsOptions<TSetting>,
 ) => {
   return useQuery<TSetting[], Error, TSetting[], UseServarrSettingsQueryKey>({
@@ -461,6 +494,153 @@ export const useDeleteJellyfinSettings = (
 
 export type UseDeleteJellyfinSettingsResult = ReturnType<
   typeof useDeleteJellyfinSettings
+>
+
+// --------------------------------------------------------------------------
+// Download client (currently qBittorrent)
+// --------------------------------------------------------------------------
+
+type UseDownloadClientSettingsQueryKey = ['settings', 'download-client']
+
+type UseDownloadClientSettingsOptions = Omit<
+  UseQueryOptions<
+    DownloadClientSetting,
+    Error,
+    DownloadClientSetting,
+    UseDownloadClientSettingsQueryKey
+  >,
+  'queryKey' | 'queryFn'
+>
+
+export const useDownloadClientSettings = (
+  options?: UseDownloadClientSettingsOptions,
+) => {
+  return useQuery<
+    DownloadClientSetting,
+    Error,
+    DownloadClientSetting,
+    UseDownloadClientSettingsQueryKey
+  >({
+    queryKey: ['settings', 'download-client'],
+    queryFn: async () => {
+      return await GetApiHandler<DownloadClientSetting>(
+        `/settings/download-client`,
+      )
+    },
+    staleTime: 0,
+    ...options,
+  })
+}
+
+export type UseDownloadClientSettingsResult = ReturnType<
+  typeof useDownloadClientSettings
+>
+
+type UseTestDownloadClientOptions = Omit<
+  UseMutationOptions<BasicResponseDto, Error, DownloadClientSetting>,
+  'mutationFn' | 'mutationKey'
+>
+
+export const useTestDownloadClient = (
+  options?: UseTestDownloadClientOptions,
+) => {
+  return useMutation<BasicResponseDto, Error, DownloadClientSetting>({
+    mutationKey: ['settings', 'testDownloadClient'],
+    mutationFn: async (payload) => {
+      return await PostApiHandler<BasicResponseDto>(
+        '/settings/test/download-client',
+        payload,
+      )
+    },
+    ...options,
+  })
+}
+
+export type UseTestDownloadClientResult = ReturnType<
+  typeof useTestDownloadClient
+>
+
+type UseSaveDownloadClientSettingsOptions = Omit<
+  UseMutationOptions<BasicResponseDto, Error, DownloadClientSetting>,
+  'mutationFn' | 'mutationKey' | 'onSuccess'
+>
+
+export const useSaveDownloadClientSettings = (
+  options?: UseSaveDownloadClientSettingsOptions,
+) => {
+  const queryClient = useQueryClient()
+
+  return useMutation<BasicResponseDto, Error, DownloadClientSetting>({
+    mutationKey: ['settings', 'saveDownloadClient'],
+    mutationFn: async (payload) => {
+      const response = await PostApiHandler<BasicResponseDto>(
+        '/settings/download-client',
+        payload,
+      )
+
+      return assertSettingsMutationSucceeded(
+        response,
+        'Download client settings could not be updated',
+      )
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ['settings'] satisfies UseSettingsQueryKey,
+      })
+      queryClient.invalidateQueries({
+        queryKey: [
+          'settings',
+          'download-client',
+        ] satisfies UseDownloadClientSettingsQueryKey,
+      })
+    },
+    ...options,
+  })
+}
+
+export type UseSaveDownloadClientSettingsResult = ReturnType<
+  typeof useSaveDownloadClientSettings
+>
+
+type UseDeleteDownloadClientSettingsOptions = Omit<
+  UseMutationOptions<BasicResponseDto, Error, void>,
+  'mutationFn' | 'mutationKey' | 'onSuccess'
+>
+
+export const useDeleteDownloadClientSettings = (
+  options?: UseDeleteDownloadClientSettingsOptions,
+) => {
+  const queryClient = useQueryClient()
+
+  return useMutation<BasicResponseDto, Error, void>({
+    mutationKey: ['settings', 'deleteDownloadClient'],
+    mutationFn: async () => {
+      const response = await DeleteApiHandler<BasicResponseDto>(
+        '/settings/download-client',
+      )
+
+      return assertSettingsMutationSucceeded(
+        response,
+        'Download client settings could not be updated',
+      )
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ['settings'] satisfies UseSettingsQueryKey,
+      })
+      queryClient.invalidateQueries({
+        queryKey: [
+          'settings',
+          'download-client',
+        ] satisfies UseDownloadClientSettingsQueryKey,
+      })
+    },
+    ...options,
+  })
+}
+
+export type UseDeleteDownloadClientSettingsResult = ReturnType<
+  typeof useDeleteDownloadClientSettings
 >
 
 // --------------------------------------------------------------------------

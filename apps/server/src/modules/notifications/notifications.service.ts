@@ -17,9 +17,11 @@ import { getErrorMessage } from '../../utils/connection-error';
 import { MediaServerFactory } from '../api/media-server/media-server.factory';
 import { IMediaServerService } from '../api/media-server/media-server.interface';
 import {
+  CollectionHandlerFailedDto,
   CollectionMediaAddedDto,
   CollectionMediaHandledDto,
   CollectionMediaRemovedDto,
+  NotificationMediaItem,
   OverlayAppliedDto,
   OverlayRevertedDto,
   RuleHandlerFailedDto,
@@ -250,20 +252,22 @@ export class NotificationService implements OnModuleInit {
     notificationId: number;
   }) {
     try {
-      const ruleGroup = await this.ruleGroupRepo.findOne({
-        where: { id: payload.rulegroupId },
-      });
+      if (payload.rulegroupId && payload.notificationId) {
+        const ruleGroup = await this.ruleGroupRepo.findOne({
+          where: { id: payload.rulegroupId },
+        });
 
-      const notificationConfig = await this.notificationRepo.findOne({
-        where: { id: payload.notificationId },
-      });
+        const notificationConfig = await this.notificationRepo.findOne({
+          where: { id: payload.notificationId },
+        });
 
-      if (ruleGroup && notificationConfig) {
-        ruleGroup.notifications = ruleGroup.notifications.filter(
-          (c) => c.id !== payload.notificationId,
-        );
-        await this.ruleGroupRepo.save(ruleGroup);
-        return { code: 1, result: 'success' };
+        if (ruleGroup && notificationConfig) {
+          ruleGroup.notifications = ruleGroup.notifications.filter(
+            (c) => c.id !== payload.notificationId,
+          );
+          await this.ruleGroupRepo.save(ruleGroup);
+          return { code: 1, result: 'success' };
+        }
       }
 
       return { code: 0, result: 'failed' };
@@ -679,7 +683,7 @@ export class NotificationService implements OnModuleInit {
 
   public async handleNotification(
     type: NotificationType,
-    mediaItems?: { mediaServerId: string }[],
+    mediaItems?: NotificationMediaItem[],
     collectionName?: string,
     dayAmount?: number,
     agent?: NotificationAgent,
@@ -708,7 +712,17 @@ export class NotificationService implements OnModuleInit {
     payload.extra.push({ name: 'dayAmount', value: dayAmount?.toString() });
     payload.extra.push({
       name: 'mediaItems',
-      value: JSON.stringify(mediaItems),
+      // Keep the wire shape lean; the metadata snapshot is only for internal
+      // title rendering. `requestedBy` is the exception: an external workflow
+      // needs it to know who to ask before the item is deleted.
+      value: JSON.stringify(
+        mediaItems?.map((item) => ({
+          mediaServerId: item.mediaServerId,
+          ...(item.requestedBy?.length
+            ? { requestedBy: item.requestedBy }
+            : {}),
+        })),
+      ),
     });
 
     // get the rulegroup when available
@@ -760,7 +774,7 @@ export class NotificationService implements OnModuleInit {
         case NotificationType.COLLECTION_HANDLING_FAILED:
           subject = 'Collection Handling Failed';
           message =
-            '⚠️ Oops! Something went wrong while processing your collections.';
+            "⚠️ Couldn't finish handling one or more items in '{collection_name}'. Check the Maintainerr logs for details.";
           break;
         case NotificationType.RULE_HANDLING_FAILED:
           subject = 'Rule Handling Failed';
@@ -770,7 +784,7 @@ export class NotificationService implements OnModuleInit {
         case NotificationType.MEDIA_ABOUT_TO_BE_HANDLED:
           subject = 'Media About to be Handled';
           message =
-            "⏰ Reminder: '{media_title}' will be handled in {days} days. If you want to keep it, make sure to take action before it's gone. Don’t miss out!";
+            "⏰ Reminder: '{media_title}'{requested_by} will be handled in {days} days. If you want to keep it, make sure to take action before it's gone. Don’t miss out!";
           break;
         case NotificationType.MEDIA_ADDED_TO_COLLECTION:
           subject = 'Media Added to Collection';
@@ -855,83 +869,122 @@ export class NotificationService implements OnModuleInit {
 
   private async transformMessageContent(
     message: string,
-    items?: { mediaServerId: string }[],
+    items?: NotificationMediaItem[],
     collectionName?: string,
     dayAmount?: number,
   ): Promise<string> {
-    try {
-      const mediaServer = await this.getMediaServer();
-      if (items) {
-        if (items.length > 1) {
-          // if multiple items
-          const titles = [];
-          let numUnknownItems = 0;
+    // Collection name and day count are plain string substitutions that don't
+    // need the media server - resolve them up front so an unavailable media
+    // server (which only affects the media-title lookups below) can't leave
+    // their placeholders raw. Strip the collection clause entirely when there's
+    // no collection context (e.g. an infrastructure-level failure) so we never
+    // deliver a raw "{collection_name}" token.
+    message = collectionName
+      ? message.replace('{collection_name}', collectionName)
+      : message.replace(" in '{collection_name}'", '');
 
-          for (const i of items) {
-            const item = await mediaServer.getMetadata(i.mediaServerId);
-
-            if (item) {
-              titles.push(this.getTitle(item));
-            } else {
-              numUnknownItems++;
-            }
-          }
-
-          if (numUnknownItems > 0) {
-            titles.push(
-              `${numUnknownItems} item${
-                numUnknownItems > 1 ? 's' : ''
-              } that no longer exist${numUnknownItems > 1 ? '' : 's'} in the media server`,
-            );
-          }
-
-          const result = titles
-            .map((name) => `* ${name.charAt(0).toUpperCase() + name.slice(1)}`)
-            .join(' \n');
-
-          message = message.replace('{media_items}', result);
-        } else {
-          // if 1 item
-          const item = await mediaServer.getMetadata(items[0].mediaServerId);
-          message = message.replace(
-            '{media_title}',
-            item
-              ? this.getTitle(item)
-              : '1 item that no longer exists in the media server',
-          );
-        }
-      }
-
-      message = collectionName
-        ? message.replace('{collection_name}', collectionName)
+    message =
+      dayAmount && dayAmount > 0
+        ? message.replace('{days}', dayAmount.toString())
         : message;
 
-      message =
-        dayAmount && dayAmount > 0
-          ? message.replace('{days}', dayAmount.toString())
-          : message;
+    if (!items) {
+      return this.applyRequestedBy(message);
+    }
+
+    try {
+      const mediaServer = await this.getMediaServer();
+      if (items.length > 1) {
+        // if multiple items
+        const titles = [];
+        let numUnknownItems = 0;
+
+        for (const i of items) {
+          // Prefer the snapshot captured before handling; a handled item is
+          // often already gone from the media server, so a live lookup would
+          // come back empty (#3249).
+          const item =
+            i.metadata ?? (await mediaServer.getMetadata(i.mediaServerId));
+
+          if (item) {
+            // Per line, not per message: a batch can mix requesters.
+            titles.push(`${this.getTitle(item)}${this.formatRequestedBy(i)}`);
+          } else {
+            numUnknownItems++;
+          }
+        }
+
+        if (numUnknownItems > 0) {
+          titles.push(
+            `${numUnknownItems} item${
+              numUnknownItems > 1 ? 's' : ''
+            } that no longer exist${numUnknownItems > 1 ? '' : 's'} in the media server`,
+          );
+        }
+
+        const result = titles
+          .map((name) => `* ${name.charAt(0).toUpperCase() + name.slice(1)}`)
+          .join(' \n');
+
+        message = message.replace('{media_items}', result);
+        message = this.applyRequestedBy(message);
+      } else {
+        // if 1 item
+        const item =
+          items[0].metadata ??
+          (await mediaServer.getMetadata(items[0].mediaServerId));
+        message = message.replace(
+          '{media_title}',
+          item
+            ? this.getTitle(item)
+            : '1 item that no longer exists in the media server',
+        );
+        message = this.applyRequestedBy(message, items[0]);
+      }
 
       return message;
     } catch (error) {
       if (error instanceof ServiceUnavailableException) {
         // Media server in transition (switched but not yet configured, or
         // mid-switch). Leave the message untransformed; downstream handlers
-        // will still see the raw template.
+        // will still see the raw template. The requester came from Seerr, so it
+        // still resolves.
         this.logger.debug(
           'Skipping notification message transformation; media server not ready',
         );
         this.logger.debug(error);
-        return message;
+        return this.applyRequestedBy(
+          message,
+          items.length === 1 ? items[0] : undefined,
+        );
       }
       this.logger.error("Couldn't transform notification message");
       this.logger.debug(error);
     }
   }
 
+  /**
+   * The `{requested_by}` placeholder carries its own punctuation so this single
+   * replace always fires, collapsing to '' when nobody requested the item. A
+   * raw token can therefore never reach a user.
+   */
+  private applyRequestedBy(
+    message: string,
+    item?: NotificationMediaItem,
+  ): string {
+    return message.replace('{requested_by}', this.formatRequestedBy(item));
+  }
+
+  private formatRequestedBy(item?: NotificationMediaItem): string {
+    return item?.requestedBy?.length
+      ? ` (requested by ${item.requestedBy.join(', ')})`
+      : '';
+  }
+
   private getTitle(item: MediaItem): string {
     // Branch on the server-agnostic item type, not on parentId/grandparentId
     // presence. Plex leaves a movie's parent empty, but Emby/Jellyfin set
-    // parentId to the containing library folder — so keying off parentId
+    // parentId to the containing library folder - so keying off parentId
     // misclassified Emby movies as seasons and rendered them as
     // "undefined - season undefined".
     switch (item.type) {
@@ -959,15 +1012,22 @@ export class NotificationService implements OnModuleInit {
   }
 
   @OnEvent(MaintainerrEvent.CollectionHandler_Failed)
-  private async collectionHandlerFailed() {
-    await this.handleNotification(NotificationType.COLLECTION_HANDLING_FAILED);
+  private async collectionHandlerFailed(data?: CollectionHandlerFailedDto) {
+    await this.handleNotification(
+      NotificationType.COLLECTION_HANDLING_FAILED,
+      undefined,
+      data?.collectionName,
+      undefined,
+      undefined,
+      data?.identifier,
+    );
   }
 
   @OnEvent(MaintainerrEvent.RuleHandlerQueue_StatusUpdated)
   private ruleQueueStatusChanged(event: RuleHandlerQueueStatusUpdatedEventDto) {
     const nowActive = !!event.data?.processingQueue;
     if (nowActive === this.batchActive) {
-      // Mid-batch progress update — nothing to do.
+      // Mid-batch progress update - nothing to do.
       return;
     }
     // Reset on every transition (in either direction). Clearing on the

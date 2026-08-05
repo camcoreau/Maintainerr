@@ -43,7 +43,7 @@ const RuleGroup = (props: {
   onDelete: () => void
   onEdit: (group: IRuleGroup) => void
 }) => {
-  const [showsureDelete, setShowSureDelete] = useState<boolean>(false)
+  const [showSureDelete, setShowSureDelete] = useState<boolean>(false)
   const {
     title: libraryTitle,
     hasLibraryId,
@@ -82,7 +82,9 @@ const RuleGroup = (props: {
     DeleteApiHandler(`/rules/${props.group.id}`)
       .then((resp) => {
         if (resp.code === 1) props.onDelete()
-        else toast.error('Failed to delete rule group.')
+        // The media server explains a refused delete, and it stays refused
+        // until the user acts on the reason.
+        else toast.error(resp.message || 'Failed to delete rule group.')
       })
       .catch((error: unknown) => {
         void logClientError(
@@ -201,7 +203,7 @@ const RuleGroup = (props: {
             />
           </div>
           <div>
-            {showsureDelete ? (
+            {showSureDelete ? (
               <DeleteButton onClick={confirmedDelete} text="Are you sure?" />
             ) : (
               <DeleteButton

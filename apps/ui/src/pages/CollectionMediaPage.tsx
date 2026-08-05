@@ -1,4 +1,8 @@
-import { type MediaItem } from '@maintainerr/contracts'
+import {
+  MediaServerFeature,
+  supportsFeature,
+  type MediaItem,
+} from '@maintainerr/contracts'
 import { useCallback, useRef, useState } from 'react'
 import { useOutletContext, useParams } from 'react-router-dom'
 import type { ICollectionMedia } from '../components/Collection'
@@ -10,6 +14,7 @@ import {
 } from '../components/Common/MediaLibrarySortControl'
 import OverviewContent from '../components/Overview/Content'
 import useInfinitePaginatedList from '../hooks/useInfinitePaginatedList'
+import { useMediaServerType } from '../hooks/useMediaServerType'
 import type { CollectionDetailOutletContext } from './CollectionDetailPage'
 import GetApiHandler from '../utils/ApiHandler'
 
@@ -33,12 +38,14 @@ const CollectionMediaPage = () => {
     useOutletContext<CollectionDetailOutletContext>()
   const { id } = useParams<{ id: string }>()
   const [media, setMedia] = useState<ICollectionMedia[]>([])
+  const { mediaServerType } = useMediaServerType()
   const fetchAmount = 30
   const mediaRef = useRef<ICollectionMedia[]>([])
   const libraryType = collection.type === 'movie' ? 'movie' : 'show'
   const sortConfig = getCollectionMediaSortConfig(
     libraryType,
     collection.deleteAfterDays != null,
+    supportsFeature(mediaServerType, MediaServerFeature.LIBRARY_STUDIO_SORT),
   )
   const { sortValue, sortParams, onSortChange } =
     useMediaLibrarySort(sortConfig)
@@ -149,6 +156,17 @@ const CollectionMediaPage = () => {
           )
           updateMedia((currentMedia) =>
             currentMedia.filter((item) => item.mediaServerId !== id),
+          )
+        }}
+        onItemPostponed={(id: string, addDate: string) => {
+          // Patch the local addDate so the "days left" badge reflects the new
+          // deletion date immediately, without refetching the page.
+          updateMedia((currentMedia) =>
+            currentMedia.map((item) =>
+              item.mediaServerId === id
+                ? { ...item, addDate: new Date(addDate) }
+                : item,
+            ),
           )
         }}
         collectionInfo={media}

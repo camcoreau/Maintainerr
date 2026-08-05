@@ -25,13 +25,7 @@ export interface TautulliUser {
 
 export interface TautulliMetadata {
   media_type:
-    | 'season'
-    | 'episode'
-    | 'movie'
-    | 'track'
-    | 'album'
-    | 'artist'
-    | 'show';
+    'season' | 'episode' | 'movie' | 'track' | 'album' | 'artist' | 'show';
   rating_key: string;
   parent_rating_key: string;
   grandparent_rating_key: string;
@@ -114,6 +108,12 @@ export class TautulliApiService {
   }
 
   public init() {
+    // Drop the previous client first. Without this, removing Tautulli from
+    // settings left the old one in place and the app kept querying an
+    // integration the user had deleted, until the next restart. Tracearr and
+    // Streamystats already reset this way.
+    this.api = undefined;
+
     if (!this.settings.tautulli_url) {
       return;
     }

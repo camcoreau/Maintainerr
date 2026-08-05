@@ -1,11 +1,5 @@
 import { Application, MediaType, RulePossibility } from '@maintainerr/contracts'
-import {
-  cleanup,
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-} from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import RuleInput from './index'
 
@@ -76,7 +70,6 @@ describe('RuleInput', () => {
   })
 
   afterEach(() => {
-    cleanup()
     vi.clearAllMocks()
   })
 
@@ -164,13 +157,157 @@ describe('RuleInput', () => {
     })
 
     await waitFor(() => {
-      const committedRule = onCommit.mock.calls.at(-1)?.[1]
+      const committedRule = onCommit.mock.calls.at(-1)?.[0]
       expect(committedRule).toMatchObject({
         firstVal: [Application.RADARR, listPropertyId],
         action: RulePossibility.EXISTS,
       })
       expect(committedRule.lastVal).toBeUndefined()
       expect(committedRule.customVal).toBeUndefined()
+    })
+  })
+
+  it('does not commit a non-first rule until its operator is chosen', async () => {
+    render(
+      <RuleInput
+        id={2}
+        tagId={1}
+        section={2}
+        mediaType={MediaType.MOVIE}
+        radarrSettingsId={1}
+        onCommit={onCommit}
+        onIncomplete={onIncomplete}
+        onDelete={onDelete}
+      />,
+    )
+
+    fireEvent.change(screen.getByLabelText('First Value'), {
+      target: { value: JSON.stringify([Application.RADARR, listPropertyId]) },
+    })
+    fireEvent.change(screen.getByLabelText('Action'), {
+      target: { value: String(RulePossibility.EXISTS) },
+    })
+
+    // First value and action are complete, but the (required) section operator
+    // is still empty, so the rule must be reported incomplete, not committed.
+    await waitFor(() => {
+      expect(onIncomplete).toHaveBeenCalled()
+    })
+    expect(onCommit).not.toHaveBeenCalled()
+  })
+
+  describe('application filtering', () => {
+    // The rule builder must only offer an arr's properties when the collection
+    // has a server of that arr selected; an entry for an unbound arr saves
+    // into a hard validation failure on the server.
+    const showConstants = {
+      applications: [
+        {
+          id: Application.SONARR,
+          name: 'Sonarr',
+          mediaType: MediaType.SHOW,
+          props: [
+            {
+              id: 0,
+              name: 'addDate',
+              humanName: 'Date added',
+              mediaType: MediaType.SHOW,
+              type: {
+                key: '0',
+                possibilities: [RulePossibility.EXISTS],
+              },
+            },
+          ],
+        },
+        {
+          id: Application.SPORTARR,
+          name: 'Sportarr',
+          mediaType: MediaType.SHOW,
+          props: [
+            {
+              id: 0,
+              name: 'addDate',
+              humanName: 'Date added',
+              mediaType: MediaType.SHOW,
+              type: {
+                key: '0',
+                possibilities: [RulePossibility.EXISTS],
+              },
+            },
+          ],
+        },
+      ],
+    }
+
+    const renderShowRuleInput = (settings: {
+      sonarrSettingsId?: number | null
+      sportarrSettingsId?: number | null
+    }) => {
+      useRuleConstantsMock.mockReturnValue({
+        data: showConstants,
+        isLoading: false,
+      })
+      return render(
+        <RuleInput
+          id={1}
+          mediaType={MediaType.SHOW}
+          dataType="show"
+          sonarrSettingsId={settings.sonarrSettingsId}
+          sportarrSettingsId={settings.sportarrSettingsId}
+          onCommit={onCommit}
+          onIncomplete={onIncomplete}
+          onDelete={onDelete}
+        />,
+      )
+    }
+
+    it('hides Sportarr properties when no Sportarr server is selected', () => {
+      renderShowRuleInput({ sonarrSettingsId: 1, sportarrSettingsId: null })
+
+      expect(screen.getByText('Sonarr - Date added')).toBeDefined()
+      expect(screen.queryByText('Sportarr - Date added')).toBeNull()
+    })
+
+    it('offers Sportarr and hides Sonarr for a Sportarr-managed collection', () => {
+      renderShowRuleInput({ sonarrSettingsId: null, sportarrSettingsId: 1 })
+
+      expect(screen.getByText('Sportarr - Date added')).toBeDefined()
+      expect(screen.queryByText('Sonarr - Date added')).toBeNull()
+    })
+  })
+
+  it('commits a non-first rule once an operator is selected', async () => {
+    render(
+      <RuleInput
+        id={2}
+        tagId={1}
+        section={2}
+        mediaType={MediaType.MOVIE}
+        radarrSettingsId={1}
+        onCommit={onCommit}
+        onIncomplete={onIncomplete}
+        onDelete={onDelete}
+      />,
+    )
+
+    fireEvent.change(screen.getByLabelText('First Value'), {
+      target: { value: JSON.stringify([Application.RADARR, listPropertyId]) },
+    })
+    fireEvent.change(screen.getByLabelText('Action'), {
+      target: { value: String(RulePossibility.EXISTS) },
+    })
+    // "1" is the OR operator value emitted by the operator dropdown.
+    fireEvent.change(screen.getByLabelText('Section Operator'), {
+      target: { value: '1' },
+    })
+
+    await waitFor(() => {
+      const committedRule = onCommit.mock.calls.at(-1)?.[0]
+      expect(committedRule).toMatchObject({
+        firstVal: [Application.RADARR, listPropertyId],
+        action: RulePossibility.EXISTS,
+        operator: '1',
+      })
     })
   })
 })

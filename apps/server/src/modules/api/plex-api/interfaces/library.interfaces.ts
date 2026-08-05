@@ -46,10 +46,7 @@ export interface PlexLibraryResponse {
     size: number;
     totalSize?: number;
     Metadata?:
-      | PlexLibraryItem[]
-      | PlexCollection[]
-      | PlexCollection
-      | PlexPlaylist[];
+      PlexLibraryItem[] | PlexCollection[] | PlexCollection | PlexPlaylist[];
   };
 }
 export interface PlexGenre {
@@ -133,4 +130,11 @@ export interface PlexSeenBy extends PlexLibraryItem {
   viewedAt: number;
   accountID: number;
   deviceID: number;
+  // Path form (`/library/metadata/<ratingKey>`) of an episode row's season and
+  // show. Undocumented on the history endpoint - the OpenAPI spec documents
+  // `grandparentRatingKey`, which real servers do not send - and absent
+  // entirely over some connections (#3082), so both are optional and the
+  // show/season rollup stands down when either is missing.
+  parentKey?: string;
+  grandparentKey?: string;
 }

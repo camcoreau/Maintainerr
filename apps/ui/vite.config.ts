@@ -42,6 +42,7 @@ export default defineConfig(({ mode }) => {
     server: {
       host: true,
       port: 3000,
+      allowedHosts: ['dev.maintainerr.info'],
       proxy: {
         '/api': {
           target: 'http://localhost:6246',
@@ -54,6 +55,7 @@ export default defineConfig(({ mode }) => {
     },
     test: {
       environment: 'jsdom',
+      setupFiles: ['./src/test-utils/react-cleanup.ts'],
     },
     // Ensure environment variables are available and can be replaced at runtime
     define: {

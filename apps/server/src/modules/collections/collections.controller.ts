@@ -10,12 +10,15 @@ import {
   MediaItemTypes,
   MediaLibrarySortField,
   MediaSortOrder,
+  POSTPONE_MAX_DAYS,
+  POSTPONE_MIN_DAYS,
   ServarrAction,
   collectionMediaSortFields,
   mediaLibrarySortFields,
   mediaSortOrders,
 } from '@maintainerr/contracts';
 import {
+  BadGatewayException,
   BadRequestException,
   Body,
   ConflictException,
@@ -54,7 +57,15 @@ import {
   InvalidCollectionPosterError,
 } from './collection-poster.service';
 import { CollectionWorkerService } from './collection-worker.service';
-import { CollectionsService } from './collections.service';
+import {
+  CollectionsService,
+  PostponeCollectionMediaResult,
+} from './collections.service';
+
+// How long a postpone waits for an in-flight collection or rule run before
+// giving up. Long enough to ride out a run that is finishing, short enough to
+// stay within a browser's patience.
+const POSTPONE_LOCK_WAIT_MS = 30000;
 
 const collectionMediaSortQuerySchema = z
   .enum(collectionMediaSortFields)
@@ -140,6 +151,7 @@ const collectionBaseShape = {
   visibleOnRecommended: z.boolean().optional(),
   visibleOnHome: z.boolean().optional(),
   listExclusions: z.boolean().optional(),
+  cleanupLeftoverFolders: z.boolean().optional(),
   forceSeerr: z.boolean().optional(),
   deleteAfterDays: z.coerce.number().int().optional(),
   manualCollection: z.boolean().optional(),
@@ -148,8 +160,11 @@ const collectionBaseShape = {
   tautulliWatchedPercentOverride: z.coerce.number().int().optional().nullable(),
   radarrSettingsId: z.coerce.number().int().optional().nullable(),
   sonarrSettingsId: z.coerce.number().int().optional().nullable(),
+  sportarrSettingsId: z.coerce.number().int().optional().nullable(),
   radarrQualityProfileId: z.coerce.number().int().optional().nullable(),
   sonarrQualityProfileId: z.coerce.number().int().optional().nullable(),
+  sportarrQualityProfileId: z.coerce.number().int().optional().nullable(),
+  tagInArr: z.boolean().optional(),
   sortTitle: z.string().optional().nullable(),
   mediaServerSort: collectionMediaSortKeySchema.optional().nullable(),
   overlayEnabled: z.boolean().optional(),
@@ -189,7 +204,10 @@ export const updateScheduleBodySchema = z.object({
     }),
 });
 const manualCollectionContextSchema = z.object({
-  id: z.coerce.number().int(),
+  // Media-server item id: a numeric Plex ratingKey or a hex-GUID Jellyfin/Emby
+  // id. Coerce to a string rather than a number - a GUID coerced to a number is
+  // NaN (#3185), and every consumer already uses the id as a string.
+  id: z.coerce.string().min(1),
   index: z.coerce.number().int().optional(),
   parentIndex: z.coerce.number().int().optional(),
   type: z.enum(MediaItemTypes),
@@ -212,6 +230,20 @@ export const handleCollectionMediaBodySchema = z.object({
   collectionId: z.number().int(),
   mediaId: z.string().min(1),
 });
+export const postponeCollectionMediaBodySchema = z.object({
+  // Coerced like the other collection endpoints: this one is called by
+  // external automation, which routinely sends ids as strings.
+  collectionId: z.coerce.number().int(),
+  mediaId: z.string().min(1),
+  // Omit to reset the full grace window; provide to push the deadline out by
+  // this many days.
+  days: z.coerce
+    .number()
+    .int()
+    .min(POSTPONE_MIN_DAYS)
+    .max(POSTPONE_MAX_DAYS)
+    .optional(),
+});
 
 type CreateCollectionBody = z.infer<typeof createCollectionBodySchema>;
 type AddToCollectionBody = z.infer<typeof addToCollectionBodySchema>;
@@ -224,6 +256,9 @@ type ManualCollectionActionBody = z.infer<
 >;
 type HandleCollectionMediaBody = z.infer<
   typeof handleCollectionMediaBodySchema
+>;
+type PostponeCollectionMediaBody = z.infer<
+  typeof postponeCollectionMediaBodySchema
 >;
 
 @Controller('api/collections')
@@ -370,16 +405,33 @@ export class CollectionsController {
   }
 
   @Post('/media/add')
-  ManualActionOnCollection(
+  async ManualActionOnCollection(
     @Body(new ZodValidationPipe(manualCollectionActionBodySchema))
     request: ManualCollectionActionBody,
   ) {
-    return this.collectionService.MediaCollectionActionWithContext(
-      request.collectionId,
-      request.context,
-      { mediaServerId: request.mediaId },
-      request.action === 0 ? 'add' : 'remove',
-    );
+    const result =
+      await this.collectionService.MediaCollectionActionWithContext(
+        request.collectionId,
+        request.context,
+        { mediaServerId: request.mediaId },
+        request.action === 0 ? 'add' : 'remove',
+      );
+
+    // A rejected item and an item the context resolved to nothing both used to
+    // answer 201, so the modal closed as though the action had worked.
+    if (result.resolvedCount === 0) {
+      throw new BadRequestException(
+        'This item cannot be applied to the selected collection',
+      );
+    }
+
+    if (result.serverRejectedIds.length > 0) {
+      throw new BadGatewayException(
+        `The media server refused ${result.serverRejectedIds.length} of ${result.resolvedCount} item(s)`,
+      );
+    }
+
+    return result.collection;
   }
 
   @Post('/media/handle')
@@ -425,12 +477,15 @@ export class CollectionsController {
     }
 
     try {
-      const handled = await this.collectionHandler.handleMedia(
+      const result = await this.collectionHandler.handleMedia(
         collection,
         collectionMedia,
       );
 
-      if (!handled) {
+      // 'handled' and 'removed-missing' both leave the item resolved (acted on
+      // or pruned because it no longer exists); only an unrecoverable 'failed'
+      // is surfaced as a conflict.
+      if (result === 'failed') {
         throw new ConflictException(
           'The collection action could not be executed for this item',
         );
@@ -438,6 +493,62 @@ export class CollectionsController {
     } finally {
       release();
     }
+  }
+
+  @Post('/media/postpone')
+  @ApiOperation({
+    summary: 'Postpone (or reset) the deletion timer for one collection item',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Returns the new addDate, the collection deleteAfterDays, and the resulting deletionDate.',
+  })
+  async postponeCollectionMedia(
+    @Body(new ZodValidationPipe(postponeCollectionMediaBodySchema))
+    request: PostponeCollectionMediaBody,
+  ) {
+    // Share the collection/rule execution lock: a worker run that has already
+    // selected this item for deletion would otherwise delete it despite the
+    // postpone. Queue behind a run that is about to finish rather than
+    // dropping the caller's "keep" outright - nothing retries a 409, and once
+    // the run ends the answer is definite either way (postponed, or a 404
+    // because the item was handled).
+    const release = await this.executionLock.acquireWithin(
+      RULES_COLLECTIONS_EXECUTION_LOCK_KEY,
+      POSTPONE_LOCK_WAIT_MS,
+    );
+
+    if (!release) {
+      throw new ConflictException(
+        'Collection handling is already running. Try again when the current collection or rule execution finishes.',
+      );
+    }
+
+    let result: PostponeCollectionMediaResult | undefined;
+    try {
+      result = await this.collectionService.postponeCollectionMedia(
+        request.collectionId,
+        request.mediaId,
+        request.days,
+      );
+    } finally {
+      release();
+    }
+
+    if (!result) {
+      throw new NotFoundException('Media not found in collection');
+    }
+
+    // Outside the lock: resolving the item's title hits the media server, and
+    // a slow one must not stall every queued rule or collection run.
+    await this.collectionService.logPostponedCollectionMedia(
+      request.collectionId,
+      request.mediaId,
+      request.days,
+    );
+
+    return result;
   }
 
   @Delete('/media')

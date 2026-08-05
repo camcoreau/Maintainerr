@@ -4,6 +4,7 @@ import {
 } from '@maintainerr/contracts';
 import { Injectable, OnApplicationShutdown } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import cacheManager from '../../api/lib/cache';
 import { MediaServerFactory } from '../../api/media-server/media-server.factory';
 import { MaintainerrLogger } from '../../logging/logs.service';
 import {
@@ -75,7 +76,7 @@ export class RuleExecutorJobManagerService implements OnApplicationShutdown {
   }
 
   public async stopProcessing() {
-    // Drop any queued work – we only care about the in-flight execution
+    // Drop any queued work - we only care about the in-flight execution
     this.queue.length = 0;
 
     this.abortController?.abort();
@@ -205,6 +206,12 @@ export class RuleExecutorJobManagerService implements OnApplicationShutdown {
       } finally {
         this.processingQueue = false;
         this.processQueuePromise = null;
+        // Drop the run-scoped watch-history snapshots at batch end so the next
+        // batch rebuilds them fresh (they are persistent, so the per-group
+        // flushAll() never clears them). Groups within a batch still share one
+        // sweep; the 1 h TTL is only a backstop for an unusually long batch.
+        cacheManager.getCache('plexwatchhistory')?.data.flushAll();
+        cacheManager.getCache('jellyfinwatchhistory')?.data.flushAll();
         // Broadcast the false transition so listeners that scope work to a
         // single batch (e.g. notification dedupe) can observe batch end.
         this.emitStatusUpdate();
@@ -227,7 +234,7 @@ export class RuleExecutorJobManagerService implements OnApplicationShutdown {
       );
 
       // Everything between acquire and release lives inside this try so
-      // release() always runs — including if `emitStatusUpdate` synchronously
+      // release() always runs - including if `emitStatusUpdate` synchronously
       // throws (e.g. an event listener throws). Without this, a thrown
       // listener would leak the lock entry forever and every future
       // `tryAcquire` would return null until restart (#2799).

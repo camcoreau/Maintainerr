@@ -10,6 +10,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import * as fs from 'fs';
 import * as path from 'path';
 import { dataDir as configDataDir } from '../../app/config/dataDir';
+import { MediaServerFactory } from '../api/media-server/media-server.factory';
 import { CollectionsService } from '../collections/collections.service';
 import { Collection } from '../collections/entities/collection.entities';
 import { CollectionMedia } from '../collections/entities/collection_media.entities';
@@ -61,6 +62,7 @@ export class OverlayProcessorService {
 
   constructor(
     private readonly providerFactory: OverlayProviderFactory,
+    private readonly mediaServerFactory: MediaServerFactory,
     private readonly collectionsService: CollectionsService,
     private readonly settingsService: OverlaySettingsService,
     private readonly stateService: OverlayStateService,
@@ -155,12 +157,15 @@ export class OverlayProcessorService {
       return 'no-backup';
     }
 
-    // A failed existence check (network blip, 5xx, auth) leaves `exists`
-    // optimistically true so the upload still runs and any failure follows
-    // the existing retry path — we never drop a backup on uncertainty.
+    // A failed existence check (network blip, 5xx, auth, or a media-server
+    // switch in progress) leaves `exists` optimistically true so the upload
+    // still runs and any failure follows the existing retry path - we never
+    // drop a backup on uncertainty. `getService()` is resolved inside the try
+    // so its transient throws are caught here too.
     let exists = true;
     try {
-      exists = await provider.itemExists(mediaServerId);
+      const mediaServer = await this.mediaServerFactory.getService();
+      exists = await mediaServer.itemExists(mediaServerId);
     } catch (error) {
       this.logger.debug(error);
     }
@@ -329,7 +334,7 @@ export class OverlayProcessorService {
 
       if (shouldApply) {
         this.logger.log(
-          `Applying template overlay to item ${itemId} — ${daysLeft} day(s) left`,
+          `Applying template overlay to item ${itemId} - ${daysLeft} day(s) left`,
         );
         const success = await this.applyTemplateOverlay(
           itemId,
@@ -598,7 +603,7 @@ export class OverlayProcessorService {
       await this.saveOriginalPoster(itemId, posterBuf);
     }
 
-    // Build render context — raw data; per-element formatting is done by the render service
+    // Build render context - raw data; per-element formatting is done by the render service
     const daysLeft = this.getDaysLeft(deleteDate);
     const context: TemplateRenderContext = {
       deleteDate,

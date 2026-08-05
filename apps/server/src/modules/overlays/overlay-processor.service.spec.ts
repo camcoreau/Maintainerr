@@ -30,7 +30,6 @@ const makeProvider = (overrides: Partial<Record<string, jest.Mock>> = {}) => ({
   getRandomEpisode: jest.fn(),
   downloadImage: jest.fn(),
   uploadImage: jest.fn().mockResolvedValue(undefined),
-  itemExists: jest.fn().mockResolvedValue(true),
   ...overrides,
 });
 
@@ -38,6 +37,21 @@ const makeProviderFactory = (
   provider: ReturnType<typeof makeProvider> | null,
 ) => ({
   getProvider: jest.fn().mockResolvedValue(provider),
+});
+
+// The existence check now lives on IMediaServerService (single source of
+// truth), resolved via MediaServerFactory.getService(). Defaults to "present".
+const makeMediaServer = (
+  overrides: Partial<Record<string, jest.Mock>> = {},
+) => ({
+  itemExists: jest.fn().mockResolvedValue(true),
+  ...overrides,
+});
+
+const makeMediaServerFactory = (
+  mediaServer: ReturnType<typeof makeMediaServer> = makeMediaServer(),
+) => ({
+  getService: jest.fn().mockResolvedValue(mediaServer),
 });
 
 describe('OverlayProcessorService', () => {
@@ -57,6 +71,7 @@ describe('OverlayProcessorService', () => {
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory() as any,
       {} as any,
       settingsService as any,
       stateService as any,
@@ -114,6 +129,7 @@ describe('OverlayProcessorService', () => {
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory() as any,
       {} as any,
       settingsService as any,
       stateService as any,
@@ -170,6 +186,7 @@ describe('OverlayProcessorService', () => {
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory() as any,
       {} as any,
       settingsService as any,
       stateService as any,
@@ -222,6 +239,7 @@ describe('OverlayProcessorService', () => {
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory() as any,
       {} as any,
       settingsService as any,
       stateService as any,
@@ -280,6 +298,7 @@ describe('OverlayProcessorService', () => {
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory() as any,
       {} as any,
       settingsService as any,
       stateService as any,
@@ -366,6 +385,7 @@ describe('OverlayProcessorService', () => {
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory() as any,
       collectionsService as any,
       settingsService as any,
       stateService as any,
@@ -424,6 +444,7 @@ describe('OverlayProcessorService', () => {
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory() as any,
       collectionsService as any,
       settingsService as any,
       stateService as any,
@@ -492,6 +513,7 @@ describe('OverlayProcessorService', () => {
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory() as any,
       collectionsService as any,
       settingsService as any,
       stateService as any,
@@ -573,6 +595,7 @@ describe('OverlayProcessorService', () => {
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory() as any,
       collectionsService as any,
       settingsService as any,
       stateService as any,
@@ -604,6 +627,7 @@ describe('OverlayProcessorService', () => {
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory() as any,
       {} as any,
       settingsService as any,
       {} as any,
@@ -637,6 +661,7 @@ describe('OverlayProcessorService', () => {
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory() as any,
       {} as any,
       settingsService as any,
       {} as any,
@@ -686,6 +711,7 @@ describe('OverlayProcessorService', () => {
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory() as any,
       collectionsService as any,
       settingsService as any,
       stateService as any,
@@ -738,6 +764,7 @@ describe('OverlayProcessorService', () => {
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory() as any,
       collectionsService as any,
       {} as any,
       stateService as any,
@@ -794,6 +821,7 @@ describe('OverlayProcessorService', () => {
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory() as any,
       {} as any,
       {} as any,
       stateService as any,
@@ -839,6 +867,7 @@ describe('OverlayProcessorService', () => {
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory() as any,
       collectionsService as any,
       {} as any,
       stateService as any,
@@ -887,6 +916,7 @@ describe('OverlayProcessorService', () => {
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory() as any,
       collectionsService as any,
       {} as any,
       stateService as any,
@@ -942,6 +972,7 @@ describe('OverlayProcessorService', () => {
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory() as any,
       collectionsService as any,
       {} as any,
       stateService as any,
@@ -960,9 +991,9 @@ describe('OverlayProcessorService', () => {
 
     await service.revertCollection(42);
 
-    // Backup file must not be deleted on failure — we still need it for retry.
+    // Backup file must not be deleted on failure - we still need it for retry.
     expect(deleteSpy).not.toHaveBeenCalled();
-    // State must not be cleared on failure — next run reattempts the revert.
+    // State must not be cleared on failure - next run reattempts the revert.
     expect(stateService.removeState).not.toHaveBeenCalled();
     // No reverted event should be emitted because nothing was actually reverted.
     expect(eventEmitter.emit).not.toHaveBeenCalled();
@@ -975,10 +1006,11 @@ describe('OverlayProcessorService', () => {
         .mockResolvedValue([{ mediaServerId: 'media-1' }]),
       removeState: jest.fn().mockResolvedValue(undefined),
     };
-    const provider = makeProvider({
+    const provider = makeProvider();
+    const providerFactory = makeProviderFactory(provider);
+    const mediaServer = makeMediaServer({
       itemExists: jest.fn().mockResolvedValue(false),
     });
-    const providerFactory = makeProviderFactory(provider);
     const eventEmitter = { emit: jest.fn() };
     const collectionsService = {
       getCollection: jest.fn().mockResolvedValue({ type: 'movie' }),
@@ -986,6 +1018,7 @@ describe('OverlayProcessorService', () => {
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory(mediaServer) as any,
       collectionsService as any,
       {} as any,
       stateService as any,
@@ -1004,11 +1037,11 @@ describe('OverlayProcessorService', () => {
 
     await service.revertCollection(42);
 
-    expect(provider.itemExists).toHaveBeenCalledWith('media-1');
-    // Skip the upload — Plex would close the connection mid-stream (EPIPE)
+    expect(mediaServer.itemExists).toHaveBeenCalledWith('media-1');
+    // Skip the upload - Plex would close the connection mid-stream (EPIPE)
     // for a deleted item.
     expect(provider.uploadImage).not.toHaveBeenCalled();
-    // Stale state and the backup are no longer useful — clear them so we
+    // Stale state and the backup are no longer useful - clear them so we
     // don't retry forever and pin a deleted item's bitmap on disk.
     expect(deleteSpy).toHaveBeenCalledWith('media-1');
     expect(stateService.removeState).toHaveBeenCalledWith(42, 'media-1');
@@ -1026,10 +1059,11 @@ describe('OverlayProcessorService', () => {
         .mockResolvedValue([{ mediaServerId: 'media-1' }]),
       removeState: jest.fn().mockResolvedValue(undefined),
     };
-    const provider = makeProvider({
+    const provider = makeProvider();
+    const providerFactory = makeProviderFactory(provider);
+    const mediaServer = makeMediaServer({
       itemExists: jest.fn().mockRejectedValue(new Error('network blip')),
     });
-    const providerFactory = makeProviderFactory(provider);
     const eventEmitter = { emit: jest.fn() };
     const collectionsService = {
       getCollection: jest
@@ -1039,6 +1073,7 @@ describe('OverlayProcessorService', () => {
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory(mediaServer) as any,
       collectionsService as any,
       {} as any,
       stateService as any,
@@ -1088,14 +1123,16 @@ describe('OverlayProcessorService', () => {
         .fn()
         .mockResolvedValue([collection]),
     };
-    const provider = makeProvider({
+    const provider = makeProvider();
+    const providerFactory = makeProviderFactory(provider);
+    const mediaServer = makeMediaServer({
       itemExists: jest.fn().mockResolvedValue(false),
     });
-    const providerFactory = makeProviderFactory(provider);
     const eventEmitter = { emit: jest.fn() };
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory(mediaServer) as any,
       collectionsService as any,
       settingsService as any,
       stateService as any,
@@ -1145,6 +1182,7 @@ describe('OverlayProcessorService', () => {
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory() as any,
       collectionsService as any,
       {} as any,
       stateService as any,
@@ -1182,6 +1220,7 @@ describe('OverlayProcessorService', () => {
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory() as any,
       collectionsService as any,
       {} as any,
       stateService as any,
@@ -1240,6 +1279,7 @@ describe('OverlayProcessorService', () => {
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory() as any,
       collectionsService as any,
       {} as any,
       stateService as any,
@@ -1281,6 +1321,7 @@ describe('OverlayProcessorService', () => {
 
     const service = new OverlayProcessorService(
       providerFactory as any,
+      makeMediaServerFactory() as any,
       collectionsService as any,
       {} as any,
       stateService as any,

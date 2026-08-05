@@ -67,8 +67,11 @@ export enum Application {
   SONARR = 2,
   SEERR = 3,
   TAUTULLI = 4,
+  SPORTARR = 5,
   JELLYFIN = 6,
   EMBY = 7,
+  STREAMYSTATS = 8,
+  TRACEARR = 9,
 }
 
 /**
@@ -80,12 +83,15 @@ export const ApplicationNames: Record<Application, string> = {
   [Application.SONARR]: 'Sonarr',
   [Application.SEERR]: 'Seerr',
   [Application.TAUTULLI]: 'Tautulli',
+  [Application.SPORTARR]: 'Sportarr',
   [Application.JELLYFIN]: 'Jellyfin',
   [Application.EMBY]: 'Emby',
+  [Application.STREAMYSTATS]: 'Streamystats',
+  [Application.TRACEARR]: 'Tracearr',
 }
 
 /**
- * Media status for Overseerr/Jellyseerr requests
+ * Media status for Seerr requests
  */
 export enum RequestMediaStatus {
   UNKNOWN = 1,

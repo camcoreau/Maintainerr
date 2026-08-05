@@ -3,6 +3,7 @@ import { DocumentAddIcon, DocumentRemoveIcon } from '@heroicons/react/solid'
 import { MediaItemType, type MediaProviderIds } from '@maintainerr/contracts'
 import React, { memo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { mediaTypeLabel } from '../../../utils/mediaTypeUtils'
 import AddModal from '../../AddModal'
 import type { ICollection } from '../../Collection'
 import RemoveFromCollectionButton from '../../Collection/CollectionDetail/RemoveFromCollectionButton'
@@ -40,8 +41,11 @@ interface IMediaCard {
   id: number | string
   summary?: string
   year?: string
-  mediaType: 'movie' | 'show' | 'season' | 'episode'
+  mediaType: MediaItemType
   title: string
+  seasonNumber?: number
+  episodeNumber?: number
+  episodeTitle?: string
   providerIds?: MediaProviderIds
   libraryId?: string
   type?: MediaItemType
@@ -53,6 +57,10 @@ interface IMediaCard {
   collection?: ICollection
   isManual?: boolean
   onRemove?: (id: string) => void
+  onItemPostponed?: (id: string, addDate: string) => void
+  selectionMode?: boolean
+  selected?: boolean
+  onToggleSelection?: (mediaId: string, selected: boolean) => void
 }
 
 const MediaCard: React.FC<IMediaCard> = ({
@@ -61,6 +69,9 @@ const MediaCard: React.FC<IMediaCard> = ({
   year,
   mediaType,
   title,
+  seasonNumber,
+  episodeNumber,
+  episodeTitle,
   libraryId,
   type,
   collectionId = 0,
@@ -72,6 +83,10 @@ const MediaCard: React.FC<IMediaCard> = ({
   collection = undefined,
   isManual = false,
   onRemove = () => {},
+  onItemPostponed,
+  selectionMode = false,
+  selected = false,
+  onToggleSelection,
 }) => {
   const navigate = useNavigate()
   const [showDetail, setShowDetail] = useState(false)
@@ -125,23 +140,39 @@ const MediaCard: React.FC<IMediaCard> = ({
         mediaType={mediaType}
         providerIds={providerIds}
         itemId={id}
-        className={`media-card relative transform-gpu cursor-pointer overflow-hidden rounded-xl bg-zinc-800 bg-cover pb-[150%] ring-1 outline-hidden transition duration-300 ${showDetail ? 'show-detail' : ''}`}
+        className={`media-card relative transform-gpu cursor-pointer overflow-hidden rounded-xl bg-zinc-800 bg-cover pb-[150%] outline-hidden transition duration-300 ${selectionMode && selected ? 'ring-4 ring-maintainerr-600' : 'ring-1'} ${showDetail ? 'show-detail' : ''}`}
         onMouseEnter={() => setShowDetail(true)}
         onMouseLeave={() => setShowDetail(false)}
         onClick={() => {
+          if (selectionMode) {
+            onToggleSelection?.(id.toString(), !selected)
+            return
+          }
+
           if (showDetail) {
             setShowMediaModal(true)
           } else {
             setShowDetail(true)
           }
         }}
-        role="link"
+        onKeyDown={(event) => {
+          if (selectionMode && (event.key === 'Enter' || event.key === ' ')) {
+            event.preventDefault()
+            onToggleSelection?.(id.toString(), !selected)
+          }
+        }}
+        role={selectionMode ? 'button' : 'link'}
+        aria-pressed={selectionMode ? selected : undefined}
+        aria-label={selectionMode ? `Select ${title}` : undefined}
         tabIndex={0}
       >
         {(image) => (
           <>
             <div className="absolute right-0 left-0 flex items-center justify-between p-2">
-              {renderBadge(mediaType, mediaType)}
+              {renderBadge(
+                mediaTypeLabel(mediaType, { seasonNumber, episodeNumber }),
+                mediaType,
+              )}
               {!collectionPage && exclusionType === 'global'
                 ? renderBadge('EXCL', mediaType)
                 : undefined}
@@ -174,7 +205,7 @@ const MediaCard: React.FC<IMediaCard> = ({
             <Transition
               as="div"
               show={!image || showDetail}
-              className="absolute inset-0 transform cursor-alias overflow-hidden rounded-xl transition"
+              className={`absolute inset-0 transform overflow-hidden rounded-xl transition ${selectionMode ? 'cursor-pointer' : 'cursor-alias'}`}
               enter="opacity-0"
               enterFrom="opacity-0"
               enterTo="opacity-100"
@@ -192,11 +223,13 @@ const MediaCard: React.FC<IMediaCard> = ({
                 <div className="flex h-full w-full items-end">
                   <div className={`w-full px-2 pb-1 text-zinc-200`}>
                     {displayYear && (
-                      <div className="text-sm font-medium">{displayYear}</div>
+                      <div className="text-sm font-medium text-shadow-sm">
+                        {displayYear}
+                      </div>
                     )}
 
                     <h1
-                      className="w-full text-sm leading-tight font-bold whitespace-normal"
+                      className="w-full text-sm leading-tight font-bold whitespace-normal text-shadow-sm"
                       style={{
                         WebkitLineClamp: 3,
                         display: '-webkit-box',
@@ -207,9 +240,9 @@ const MediaCard: React.FC<IMediaCard> = ({
                     >
                       {title}
                     </h1>
-                    {mediaType == 'episode' && (
+                    {mediaType == 'episode' && episodeTitle && (
                       <div
-                        className="text-xs whitespace-normal"
+                        className="text-xs whitespace-normal text-shadow-sm"
                         style={{
                           WebkitLineClamp: 5,
                           display: '-webkit-box',
@@ -218,41 +251,43 @@ const MediaCard: React.FC<IMediaCard> = ({
                           wordBreak: 'break-word',
                         }}
                       >
-                        {summary}
+                        {episodeTitle}
                       </div>
                     )}
 
                     {!collectionPage ? (
-                      <div>
-                        <Button
-                          buttonType="twin-primary-l"
-                          buttonSize="md"
-                          className="mt-2 mb-1 h-6 w-1/2 text-zinc-200 shadow-md"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            setAddModal(true)
-                          }}
-                        >
-                          {<DocumentAddIcon className="m-auto ml-3 h-3" />}{' '}
-                          <p className="rules-button-text m-auto mr-2">
-                            {'Add'}
-                          </p>
-                        </Button>
-                        <Button
-                          buttonSize="md"
-                          buttonType="twin-primary-r"
-                          className="mt-2 h-6 w-1/2"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            setExcludeModal(true)
-                          }}
-                        >
-                          {<DocumentRemoveIcon className="m-auto ml-3 h-3" />}{' '}
-                          <p className="rules-button-text m-auto mr-2">
-                            {'Excl'}
-                          </p>
-                        </Button>
-                      </div>
+                      !selectionMode ? (
+                        <div>
+                          <Button
+                            buttonType="twin-primary-l"
+                            buttonSize="md"
+                            className="mt-2 mb-1 h-6 w-1/2 text-zinc-200 shadow-md"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setAddModal(true)
+                            }}
+                          >
+                            {<DocumentAddIcon className="m-auto ml-3 h-3" />}{' '}
+                            <p className="rules-button-text m-auto mr-2">
+                              {'Add'}
+                            </p>
+                          </Button>
+                          <Button
+                            buttonSize="md"
+                            buttonType="twin-primary-r"
+                            className="mt-2 h-6 w-1/2"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setExcludeModal(true)
+                            }}
+                          >
+                            {<DocumentRemoveIcon className="m-auto ml-3 h-3" />}{' '}
+                            <p className="rules-button-text m-auto mr-2">
+                              {'Excl'}
+                            </p>
+                          </Button>
+                        </div>
+                      ) : null
                     ) : (
                       <RemoveFromCollectionButton
                         mediaServerId={id}
@@ -274,8 +309,10 @@ const MediaCard: React.FC<IMediaCard> = ({
           id={id}
           onClose={() => setShowMediaModal(false)}
           title={title}
-          summary={summary || 'No description available.'}
+          summary={summary}
           mediaType={mediaType}
+          seasonNumber={seasonNumber}
+          episodeNumber={episodeNumber}
           providerIds={providerIds}
           year={displayYear}
           exclusionType={exclusionType}
@@ -287,6 +324,9 @@ const MediaCard: React.FC<IMediaCard> = ({
             onRemove(id.toString())
             setShowMediaModal(false)
           }}
+          onCollectionItemPostponed={(addDate) =>
+            onItemPostponed?.(id.toString(), addDate)
+          }
         />
       )}
     </div>

@@ -16,7 +16,10 @@ import { PlexGetterService } from './plex-getter.service';
 import { RadarrGetterService } from './radarr-getter.service';
 import { SeerrGetterService } from './seerr-getter.service';
 import { SonarrGetterService } from './sonarr-getter.service';
+import { SportarrGetterService } from './sportarr-getter.service';
+import { StreamystatsGetterService } from './streamystats-getter.service';
 import { TautulliGetterService } from './tautulli-getter.service';
+import { TracearrGetterService } from './tracearr-getter.service';
 
 @Injectable()
 export class ValueGetterService {
@@ -24,12 +27,24 @@ export class ValueGetterService {
     private readonly plexGetter: PlexGetterService,
     private readonly radarrGetter: RadarrGetterService,
     private readonly sonarrGetter: SonarrGetterService,
+    private readonly sportarrGetter: SportarrGetterService,
     private readonly seerrGetter: SeerrGetterService,
     private readonly tautulliGetter: TautulliGetterService,
+    private readonly streamystatsGetter: StreamystatsGetterService,
+    private readonly tracearrGetter: TracearrGetterService,
     private readonly jellyfinGetter: JellyfinGetterService,
     private readonly embyGetter: EmbyGetterService,
     private readonly mediaServerFactory: MediaServerFactory,
   ) {}
+
+  /**
+   * The media server every media-server rule value is actually read from.
+   * Exposed so callers that describe a value (rule statistics, missing-value
+   * diagnostics) can name the same property `get` resolved it against.
+   */
+  async getConfiguredServerType(): Promise<MediaServerType | null> {
+    return this.mediaServerFactory.getConfiguredServerType();
+  }
 
   async get(
     [val1, val2]: [number, number],
@@ -42,7 +57,7 @@ export class ValueGetterService {
     switch (val1) {
       // Route Plex/Jellyfin/Emby Application IDs to the configured media
       // server's getter. This handles community rules that reference the
-      // "wrong" server type — e.g. a rule authored with Application.JELLYFIN
+      // "wrong" server type - e.g. a rule authored with Application.JELLYFIN
       // can still evaluate against a configured Emby server.
       case Application.PLEX:
       case Application.JELLYFIN:
@@ -59,7 +74,10 @@ export class ValueGetterService {
                 ? this.embyGetter
                 : null;
 
-        return getter?.get(val2, libItem, dataType, ruleGroup) ?? null;
+        return (
+          getter?.get(val2, libItem, dataType, ruleGroup, arrLookupCache) ??
+          null
+        );
       }
       case Application.RADARR: {
         return await this.radarrGetter.get(
@@ -80,8 +98,23 @@ export class ValueGetterService {
           arrLookupCache,
         );
       }
+      case Application.SPORTARR: {
+        return await this.sportarrGetter.get(
+          val2,
+          libItem,
+          dataType,
+          ruleGroup,
+          currentRule,
+          arrLookupCache,
+        );
+      }
       case Application.SEERR: {
-        return await this.seerrGetter.get(val2, libItem, dataType);
+        return await this.seerrGetter.get(
+          val2,
+          libItem,
+          dataType,
+          arrLookupCache,
+        );
       }
       case Application.TAUTULLI: {
         return await this.tautulliGetter.get(
@@ -90,6 +123,12 @@ export class ValueGetterService {
           dataType,
           ruleGroup,
         );
+      }
+      case Application.STREAMYSTATS: {
+        return await this.streamystatsGetter.get(val2, libItem);
+      }
+      case Application.TRACEARR: {
+        return await this.tracearrGetter.get(val2, libItem, ruleGroup);
       }
       default: {
         return null;
