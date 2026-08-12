@@ -142,6 +142,49 @@ describe('PlexApiService.getMetadata', () => {
     );
   });
 
+  // #3449: a collection still listing deleted media logged one
+  // "is the application running?" ERROR per item against a healthy Plex.
+  it('reports a 404 as a missing item, not as a communication failure', async () => {
+    (service as any).plexClient = {
+      query: jest.fn().mockRejectedValue(
+        new Error('GET /library/metadata/123 failed: not found', {
+          cause: { response: { status: 404 } } as any,
+        }),
+      ),
+    };
+
+    expect(await service.getMetadata('123')).toBeUndefined();
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  it('still reports a non-404 metadata failure as a communication failure', async () => {
+    (service as any).plexClient = {
+      query: jest.fn().mockRejectedValue(
+        new Error('GET /library/metadata/123 failed: server error', {
+          cause: { response: { status: 503 } } as any,
+        }),
+      ),
+    };
+
+    expect(await service.getMetadata('123')).toBeUndefined();
+    expect(logger.error).toHaveBeenCalledWith(
+      'Plex api communication failure.. Is the application running?',
+    );
+  });
+
+  it('reads an all-missing batch as an empty answer, not a failure', async () => {
+    (service as any).plexClient = {
+      query: jest.fn().mockRejectedValue(
+        new Error('GET /library/metadata/1,2 failed: not found', {
+          cause: { response: { status: 404 } } as any,
+        }),
+      ),
+    };
+
+    expect(await service.getMetadataBatch(['1', '2'])).toEqual([]);
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
   it('preserves includeChildren queries while requesting external media enrichment', async () => {
     const query = jest.fn().mockResolvedValue({
       MediaContainer: { Metadata: [{ ratingKey: '123' }] },
@@ -196,6 +239,49 @@ describe('PlexApiService.getMetadata', () => {
     (service as any).plexClient = { queryAll };
 
     expect(await service.getCollectionChildren('col-1')).toEqual([]);
+  });
+
+  it('asks for external guids so children arrive with provider ids', async () => {
+    const queryAll = jest.fn().mockResolvedValue({
+      MediaContainer: { Metadata: [{ ratingKey: '1' }] },
+    });
+
+    (service as any).plexClient = { queryAll };
+
+    await service.getCollectionChildren('col-1');
+
+    expect(queryAll).toHaveBeenCalledWith(
+      { uri: '/library/collections/col-1/children?includeGuids=1' },
+      true,
+    );
+  });
+
+  it('reads a batch of ids in one guid-carrying metadata request', async () => {
+    const query = jest.fn().mockResolvedValue({
+      MediaContainer: { Metadata: [{ ratingKey: '1' }, { ratingKey: '2' }] },
+    });
+
+    (service as any).plexClient = { query };
+
+    expect(await service.getMetadataBatch(['1', '2'])).toHaveLength(2);
+    expect(query).toHaveBeenCalledWith('/library/metadata/1,2?includeGuids=1');
+  });
+
+  it('makes no request for an empty batch', async () => {
+    const query = jest.fn();
+
+    (service as any).plexClient = { query };
+
+    expect(await service.getMetadataBatch([])).toEqual([]);
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('reports no ids rather than failing the caller when a batch read fails', async () => {
+    const query = jest.fn().mockRejectedValue(new Error('boom'));
+
+    (service as any).plexClient = { query };
+
+    expect(await service.getMetadataBatch(['1'])).toEqual([]);
   });
 
   it('re-throws children query failures instead of reporting an empty collection', async () => {
@@ -1733,6 +1819,23 @@ describe('PlexApiService.resetMetadataCache', () => {
       [
         key('/library/metadata/12/children'),
         key('/library/metadata/123'),
+      ].sort(),
+    );
+  });
+
+  // A batch caches a whole id list under one key, which matching the uri as a
+  // whole never found.
+  it('drops a batched entry that holds the item among its ids', () => {
+    cache.set(key('/library/metadata/9,12,15?includeGuids=1'), 'batched');
+    cache.set(key('/library/metadata/9,15?includeGuids=1'), 'without the item');
+    cache.set(key('/library/metadata/121,123?includeGuids=1'), 'longer ids');
+
+    service.resetMetadataCache('12');
+
+    expect(cache.keys().sort()).toEqual(
+      [
+        key('/library/metadata/9,15?includeGuids=1'),
+        key('/library/metadata/121,123?includeGuids=1'),
       ].sort(),
     );
   });

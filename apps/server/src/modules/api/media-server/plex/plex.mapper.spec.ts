@@ -11,6 +11,7 @@ import {
   PlexSeenBy,
   PlexUserAccount,
 } from '../../plex-api/interfaces/library.interfaces';
+import { PlexMetadata } from '../../plex-api/interfaces/media.interface';
 import { PlexMapper } from './plex.mapper';
 
 describe('PlexMapper', () => {
@@ -279,6 +280,21 @@ describe('PlexMapper', () => {
       expect(result.providerIds.imdb).toEqual(['tt7654321']);
     });
 
+    it('lists the single studio Plex sends', () => {
+      expect(
+        PlexMapper.toMediaItem({ ...basePlexItem, studio: 'Studio A' }).studios,
+      ).toEqual(['Studio A']);
+    });
+
+    it.each([undefined, '', '   '])(
+      'leaves studios unset when Plex sends %p',
+      (studio) => {
+        expect(
+          PlexMapper.toMediaItem({ ...basePlexItem, studio }).studios,
+        ).toBeUndefined();
+      },
+    );
+
     it('should convert media sources correctly', () => {
       const result = PlexMapper.toMediaItem(basePlexItem);
 
@@ -332,6 +348,28 @@ describe('PlexMapper', () => {
         type: 'audience',
       });
       expect(result.userRating).toBe(10);
+    });
+  });
+
+  describe('metadataToMediaItem', () => {
+    const baseMetadata = {
+      ratingKey: '1',
+      guid: 'plex://movie/abc',
+      type: 'movie',
+      title: 'Test Movie',
+      addedAt: 1600000000,
+      Guid: [],
+    } as unknown as PlexMetadata;
+
+    it('carries the library section the item reports', () => {
+      const result = PlexMapper.metadataToMediaItem({
+        ...baseMetadata,
+        librarySectionID: 1,
+        librarySectionTitle: 'Movies',
+      });
+
+      expect(result.library.id).toBe('1');
+      expect(result.library.title).toBe('Movies');
     });
   });
 

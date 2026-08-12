@@ -661,11 +661,51 @@ export class PlexApiService {
         return undefined;
       }
     } catch (error) {
+      // 404 is Plex answering that the item is gone, not that it is
+      // unreachable. Blaming the connection logged one ERROR per gone item.
+      if (this.responseStatus(error) === 404) {
+        this.logger.debug(`Plex has no item with id ${key}`);
+        return undefined;
+      }
+
       this.logger.error(
         'Plex api communication failure.. Is the application running?',
       );
       this.logger.debug(error);
       return undefined;
+    }
+  }
+
+  /**
+   * Guid arrays for many items in one request. Verified on PMS 1.43.3: 240 ids
+   * answer in one response, and an unresolvable id is left out of it rather
+   * than failing the batch.
+   */
+  public async getMetadataBatch(keys: string[]): Promise<PlexMetadata[]> {
+    if (keys.length === 0) {
+      return [];
+    }
+
+    try {
+      const response = await this.plexClient.query<PlexMetadataResponse>(
+        `/library/metadata/${keys.join(',')}?includeGuids=1`,
+      );
+      return response?.MediaContainer?.Metadata ?? [];
+    } catch (error) {
+      // Plex 404s only when it holds none of the requested ids; a mixed batch
+      // is a 200 listing just the live ones (verified on PMS 1.43.3).
+      if (this.responseStatus(error) === 404) {
+        this.logger.debug(
+          `Plex has none of the ${keys.length} requested items`,
+        );
+        return [];
+      }
+
+      this.logger.error(
+        'Plex api communication failure.. Is the application running?',
+      );
+      this.logger.debug(error);
+      return [];
     }
   }
 
@@ -677,17 +717,28 @@ export class PlexApiService {
     // the one path that caches, and served pre-change metadata for the TTL.
     // Drop every option variant for this id instead.
     const cache = cacheManager.getCache('plexguid').data;
-    const uri = `/library/metadata/${mediaId}`;
+    const metadataUriPrefix = '/library/metadata/';
     // Watch state goes too, like the Jellyfin and Emby resets already do.
     // History entries are keyed by leaf ratingKey - a show or season test
     // reads its episodes' entries, not the id passed here - so the whole
     // history namespace is dropped rather than one id's key.
     const historyUri = '/status/sessions/history/all';
 
+    // Matched against the id list a uri reads, not the uri: a batch entry
+    // holding this id would otherwise keep serving its old copy. Comparing list
+    // members also keeps id 12 from matching id 123.
+    const readsMediaId = (cachedUri: string): boolean =>
+      cachedUri.startsWith(metadataUriPrefix) &&
+      cachedUri
+        .slice(metadataUriPrefix.length)
+        .split('?', 1)[0]
+        .split(',')
+        .includes(mediaId);
+
     for (const key of cache.keys()) {
       // Keys are the serialized request options, so read the uri back out
       // rather than matching on the raw key - options other than the uri end up
-      // in there too. The `?` boundary keeps id 12 from matching id 123.
+      // in there too.
       let cachedUri: string | undefined;
       try {
         cachedUri = (JSON.parse(key) as { uri?: string }).uri;
@@ -696,9 +747,8 @@ export class PlexApiService {
       }
 
       if (
-        cachedUri === uri ||
-        cachedUri?.startsWith(`${uri}?`) ||
-        cachedUri?.startsWith(historyUri)
+        cachedUri !== undefined &&
+        (readsMediaId(cachedUri) || cachedUri.startsWith(historyUri))
       ) {
         cache.del(key);
       }
@@ -1402,7 +1452,10 @@ export class PlexApiService {
       const response: PlexLibraryResponse =
         await this.plexClient.queryAll<PlexLibraryResponse>(
           {
-            uri: `/library/collections/${collectionId}/children`,
+            // Without it Plex sends only its own `plex://` guid, which carries
+            // no imdb/tmdb/tvdb id. Undocumented on this endpoint but honoured,
+            // verified on PMS 1.43.3.
+            uri: `/library/collections/${collectionId}/children?includeGuids=1`,
           },
           useCache,
         );

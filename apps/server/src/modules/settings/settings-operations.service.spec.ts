@@ -99,8 +99,10 @@ describe('SettingsOperationsService', () => {
     const setting: TracearrSetting = {
       url: 'http://tracearr.local',
       api_key: 'trr_pub_token',
-      server_id: '11111111-1111-4111-8111-111111111111',
     };
+    tracearr.resolveServerId.mockResolvedValue(
+      '11111111-1111-4111-8111-111111111111',
+    );
 
     await expect(service.updateTracearrSetting(setting)).resolves.toEqual({
       status: 'OK',
@@ -112,7 +114,7 @@ describe('SettingsOperationsService', () => {
       expect.objectContaining({
         tracearr_url: setting.url,
         tracearr_api_key: setting.api_key,
-        tracearr_server_id: setting.server_id,
+        tracearr_server_id: '11111111-1111-4111-8111-111111111111',
       }),
     );
     expect(tracearr.init).toHaveBeenCalledTimes(1);
@@ -129,31 +131,83 @@ describe('SettingsOperationsService', () => {
       service.testTracearr({
         url: 'http://tracearr.local',
         api_key: 'trr_pub_token',
-        server_id: '11111111-1111-4111-8111-111111111111',
       }),
     ).resolves.toEqual({ status: 'OK', code: 1, message: '2.0.0-beta.1' });
   });
 
-  it('loads Tracearr servers with connection fields only', async () => {
-    const connection = {
-      url: 'http://tracearr.local',
-      api_key: 'trr_pub_token',
-    };
-    const servers = [
-      {
-        id: '11111111-1111-4111-8111-111111111111',
-        name: 'Sample Plex',
-      },
-    ];
-    tracearr.getServers.mockResolvedValue(servers);
+  it('clears the Tracearr server selection when the reconfigured media server no longer matches', async () => {
+    tracearr.savedServerTracksMediaServer.mockResolvedValue(false);
 
-    await expect(service.getTracearrServers(connection)).resolves.toEqual(
-      servers,
+    await service.updateSettings({ plex_hostname: 'other-plex.local' });
+
+    expect(settingsDataService.saveSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ tracearr_server_id: null }),
     );
-    expect(tracearr.getServers).toHaveBeenCalledWith({
-      url: connection.url,
-      apiKey: connection.api_key,
+    expect(tracearr.invalidateHistory).toHaveBeenCalledTimes(1);
+  });
+
+  // The selection survives an inconclusive check, but the snapshot it was
+  // verified against does not: keeping it would let the next run read the
+  // previous media server's history without probing again.
+  it('keeps the Tracearr server selection but drops its snapshot when the match cannot be determined', async () => {
+    tracearr.savedServerTracksMediaServer.mockResolvedValue(undefined);
+
+    await service.updateSettings({ plex_hostname: 'other-plex.local' });
+
+    expect(settingsDataService.saveSettings).not.toHaveBeenCalledWith(
+      expect.objectContaining({ tracearr_server_id: null }),
+    );
+    expect(tracearr.invalidateHistory).toHaveBeenCalledTimes(1);
+  });
+
+  // Re-pointing is what invalidates the binding, so an unchanged save must not
+  // drop the history snapshot and re-probe the media server for nothing.
+  it('leaves the Tracearr snapshot alone when a Jellyfin save changes nothing', async () => {
+    settingsRepo.findOne.mockResolvedValue(
+      createSettings({
+        media_server_type: MediaServerType.JELLYFIN,
+        jellyfin_url: 'http://jellyfin.local',
+        jellyfin_api_key: 'jellyfin-key',
+      }),
+    );
+    jest.spyOn(service, 'testJellyfin').mockResolvedValue({
+      status: 'OK',
+      code: 1,
+      message: 'Success',
+      users: [{ id: 'user-1', name: 'admin' }],
     });
+
+    await service.saveJellyfinSettings({
+      jellyfin_url: 'http://jellyfin.local',
+      jellyfin_api_key: 'jellyfin-key',
+      jellyfin_user_id: 'user-1',
+    });
+
+    expect(tracearr.invalidateHistory).not.toHaveBeenCalled();
+  });
+
+  it('revalidates the Tracearr binding when a Jellyfin save changes the server', async () => {
+    settingsRepo.findOne.mockResolvedValue(
+      createSettings({
+        media_server_type: MediaServerType.JELLYFIN,
+        jellyfin_url: 'http://jellyfin.local',
+        jellyfin_api_key: 'jellyfin-key',
+      }),
+    );
+    jest.spyOn(service, 'testJellyfin').mockResolvedValue({
+      status: 'OK',
+      code: 1,
+      message: 'Success',
+      users: [{ id: 'user-1', name: 'admin' }],
+    });
+
+    await service.saveJellyfinSettings({
+      jellyfin_url: 'http://other-jellyfin.local',
+      jellyfin_api_key: 'jellyfin-key',
+      jellyfin_user_id: 'user-1',
+    });
+
+    expect(tracearr.invalidateHistory).toHaveBeenCalledTimes(1);
   });
 
   it('rejects Plex server setting changes when no Plex credentials are stored', async () => {

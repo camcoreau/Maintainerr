@@ -1,8 +1,9 @@
 import {
   embyLoginRequestSchema,
   radarrSettingSchema,
+  seerrSettingSchema,
 } from '@maintainerr/contracts';
-import { BadGatewayException, StreamableFile } from '@nestjs/common';
+import { StreamableFile } from '@nestjs/common';
 import { Response } from 'express';
 import { createReadStream } from 'fs';
 import { ZodValidationPipe } from 'nestjs-zod';
@@ -245,6 +246,24 @@ describe('SettingsController', () => {
     ).toThrow('Validation failed');
   });
 
+  it('normalises a trailing slash off a service URL rather than rejecting it (#3416)', () => {
+    const pipe = new ZodValidationPipe(seerrSettingSchema);
+
+    expect(
+      pipe.transform(
+        {
+          url: 'http://seerr.local:5055/',
+          api_key: 'key',
+        },
+        {
+          type: 'body',
+          metatype: Object,
+          data: '',
+        },
+      ),
+    ).toEqual({ url: 'http://seerr.local:5055', api_key: 'key' });
+  });
+
   it('rejects invalid Emby login requests with the shared Zod schema', () => {
     const pipe = new ZodValidationPipe(embyLoginRequestSchema);
 
@@ -295,42 +314,6 @@ describe('SettingsController', () => {
 
     expect(settingsOperationsService.testPlexAuthToken).toHaveBeenCalledTimes(
       1,
-    );
-  });
-
-  it('delegates Tracearr server discovery with connection fields', async () => {
-    const connection = {
-      url: 'http://tracearr.local',
-      api_key: 'trr_pub_token',
-    };
-    const servers = [
-      {
-        id: '11111111-1111-4111-8111-111111111111',
-        name: 'Sample Plex',
-      },
-    ];
-    settingsOperationsService.getTracearrServers.mockResolvedValue(servers);
-
-    await expect(controller.getTracearrServers(connection)).resolves.toEqual(
-      servers,
-    );
-    expect(settingsOperationsService.getTracearrServers).toHaveBeenCalledWith(
-      connection,
-    );
-  });
-
-  it('rejects an unavailable Tracearr server list', async () => {
-    settingsOperationsService.getTracearrServers.mockResolvedValue(undefined);
-
-    await expect(
-      controller.getTracearrServers({
-        url: 'http://tracearr.local',
-        api_key: 'trr_pub_token',
-      }),
-    ).rejects.toEqual(
-      new BadGatewayException(
-        'Could not load Tracearr servers. Verify URL and API key.',
-      ),
     );
   });
 });
