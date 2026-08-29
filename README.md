@@ -1,3 +1,10 @@
+> [!IMPORTANT]
+> **Unofficial CamCore downstream.** This fork is maintained by CamCore – Cameron Family Secure Network to add CamCore browser identity and build-time artwork and to build the branded multi-architecture `ghcr.io/camcoreau/maintainerr` container image. It remains a downstream of the [upstream Maintainerr project](https://github.com/Maintainerr/Maintainerr); CamCore is not affiliated with or endorsed by upstream.
+>
+> **CamCore is a privately owned and operated family technology network that delivers secure, reliable and professionally managed digital services for the Cameron household, Cameron-Media and associated family operations.** **Built for Home. Engineered Like Enterprise.**
+>
+> Prefer an immutable `sha-*` image tag, with its resolved digest recorded, over `latest`. Reviewed source, a published image, a deployed image and a verified live service are separate states. Route product questions and reproducible upstream defects upstream after testing without CamCore customisation; CamCore operational support remains private. Never add credentials or private environment details to this public repository.
+
 <p align="center">
   <img src="apps/ui/public/logo_black.svg?raw=true" alt="Maintainerr's custom image"/>
 </p>
