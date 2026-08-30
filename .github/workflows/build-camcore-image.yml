@@ -40,7 +40,7 @@ jobs:
           done
 
           curl -fsSL \
-            "https://raw.githubusercontent.com/camcoreau/Seerr/develop/public/os_icon.svg" \
+            "https://raw.githubusercontent.com/camcoreau/Seerr/develop/public/camcore-icon.svg" \
             -o apps/ui/public/camcore-icon.svg
 
       - name: Set up QEMU
