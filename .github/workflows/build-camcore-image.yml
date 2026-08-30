@@ -22,27 +22,6 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Apply official CamCore artwork
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          curl -fsSL \
-            "https://raw.githubusercontent.com/camcoreau/Seerr/develop/public/logo_full.svg" \
-            -o /tmp/camcore-logo.svg
-
-          cp /tmp/camcore-logo.svg apps/ui/public/logo_black.svg
-
-          for target in apps/ui/public/logo.svg apps/ui/public/logo_white.svg; do
-            if [ -f "$target" ]; then
-              cp /tmp/camcore-logo.svg "$target"
-            fi
-          done
-
-          curl -fsSL \
-            "https://raw.githubusercontent.com/camcoreau/Seerr/develop/public/camcore-icon.svg" \
-            -o apps/ui/public/camcore-icon.svg
-
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
